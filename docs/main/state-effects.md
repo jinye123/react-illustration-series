@@ -182,7 +182,7 @@ function App() {
    2. `use(promise|context)` (v19): 在渲染期间挂起或读取上下文; 当读取的是 Promise 且未 resolve 时, 会`throw`一个 thenable, 由 React 接住并切到 Suspense 路径.
 2. 副作用相关: `fiber树渲染`阶段.
    1. `useEffect`在`fiber树渲染`阶段(`commitRoot->commitBeforeMutationEffects`)调度`scheduleCallback(NormalSchedulerPriority, flushPassiveEffects)`, **异步执行**([链接](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberWorkLoop.js)).
-   2. `useInsertionEffect`在`fiber树渲染`阶段(`commitRoot->commitMutationEffects->commitMutationEffectsOnFiber->commitHookEffectListMount(HookInsertion | HookHasEffect)`)**同步执行**, 早于 layout([链接](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberCommitHookEffects.js)).
+   2. `useInsertionEffect`在`fiber树渲染`阶段(`commitRoot->commitMutationEffects->commitMutationEffectsOnFiber->commitHookEffectListMount(HookInsertion | HookHasEffect)`)**同步执行**, 早于 layout([链接](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberCommitWork.js)).
    3. `useLayoutEffect`在`fiber树渲染`阶段(`commitRoot->commitLayoutEffects->commitLayoutEffectOnFiber->commitHookEffectListMount(HookLayout | HookHasEffect)`)**同步执行**([链接](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberCommitWork.js)).
 
 ### 细节与误区

@@ -11,8 +11,8 @@ order: 0
 
 # React 应用的宏观包结构(web 开发)
 
-> React 工程目录的 packages 下包含 35 个包([`@17.0.2`版本](https://github.com/facebook/react/tree/v17.0.2)).
-> 其中与`web`开发相关的核心包共有 4 个, 本系列近 20 篇文章, 以这 4 个包为线索进行展开, 深入理解 react 内部作用原理.
+> React 工程目录的 packages 下包含 40+ 个包([`@19.2.6`版本](https://github.com/facebook/react/tree/v19.2.6/packages)).
+> 其中与`web`开发相关的核心包共有 5 个, 本系列以这些包为线索进行展开, 深入理解 react 内部作用原理.
 
 ## 基础包结构
 
@@ -22,24 +22,28 @@ order: 0
 
 2. react-dom
 
-   > react 渲染器之一, 是 react 与 web 平台连接的桥梁(可以在浏览器和 nodejs 环境中使用), 将`react-reconciler`中的运行结果输出到 web 界面上. 在编写`react`应用的代码时,大多数场景下, 能用到此包的就是一个入口函数`ReactDOM.render(<App/>, document.getElementById('root'))`, 其余使用的 api, 基本是`react`包提供的.
+   > react 渲染器之一, 是 react 与 web 平台连接的桥梁(可以在浏览器和 nodejs 环境中使用), 将`react-reconciler`中的运行结果输出到 web 界面上. 在编写`react`应用的代码时,大多数场景下, 用到此包的就是入口函数`createRoot(document.getElementById('root')).render(<App/>)`, 其余使用的 api, 基本是`react`包提供的.
 
-3. react-reconciler
+3. react-dom-bindings
+
+   > 自 React 18 起从`react-dom`中拆分出来的内部子包, 集中维护`HostConfig`协议的所有 web 实现(DOM 创建、属性 diff、事件代理、文本节点处理等). 业务代码无需直接依赖, 它由`react-dom`内部按需引入.
+
+4. react-reconciler
 
    > react 得以运行的核心包(综合协调`react-dom`,`react`,`scheduler`各包之间的调用与配合).
    > 管理 react 应用状态的输入和结果的输出. 将输入信号最终转换成输出信号传递给渲染器.
 
    - 接受输入(`scheduleUpdateOnFiber`), 将`fiber`树生成逻辑封装到一个回调函数中(涉及`fiber`树形结构, `fiber.updateQueue`队列, 调和算法等),
-   - 把此回调函数(`performSyncWorkOnRoot`或`performConcurrentWorkOnRoot`)送入`scheduler`进行调度
+   - 把此回调函数(`performWorkOnRoot`)送入`scheduler`进行调度
    - `scheduler`会控制回调函数执行的时机, 回调函数执行完成后得到全新的 fiber 树
    - 再调用渲染器(如`react-dom`, `react-native`等)将 fiber 树形结构最终反映到界面上
 
-4. scheduler
+5. scheduler
 
-   > 调度机制的核心实现, 控制由`react-reconciler`送入的回调函数的执行时机, 在`concurrent`模式下可以实现任务分片. 在编写`react`应用的代码时, 同样几乎不会直接用到此包提供的 api.
+   > 调度机制的核心实现, 控制由`react-reconciler`送入的回调函数的执行时机, 在`concurrent`渲染下可以实现任务分片. 在编写`react`应用的代码时, 同样几乎不会直接用到此包提供的 api.
 
    - 核心任务就是执行回调(回调函数由`react-reconciler`提供)
-   - 通过控制回调函数的执行时机, 来达到任务分片的目的, 实现可中断渲染(`concurrent`模式下才有此特性)
+   - 通过控制回调函数的执行时机, 来达到任务分片的目的, 实现可中断渲染(自 React 18 起, 所有通过`createRoot`启动的应用都默认运行在 Concurrent 渲染器下)
 
 ## 宏观总览
 
@@ -65,13 +69,13 @@ order: 0
       - 循环消费任务队列, 直到队列清空.
    2. 构造器
       `react-reconciler`包, 有 3 个核心职责:
-      1. 装载渲染器, 渲染器必须实现[`HostConfig`协议](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/README.md#practical-examples)(如: `react-dom`), 保证在需要的时候, 能够正确调用渲染器的 api, 生成实际节点(如: `dom`节点).
-      2. 接收`react-dom`包(初次`render`)和`react`包(后续更新`setState`)发起的更新请求.
+      1. 装载渲染器, 渲染器必须实现[`HostConfig`协议](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/README.md#practical-examples)(如: `react-dom`), 保证在需要的时候, 能够正确调用渲染器的 api, 生成实际节点(如: `dom`节点).
+      2. 接收`react-dom`包(初次`createRoot().render`)和`react`包(后续更新`setState/dispatchAction`)发起的更新请求.
       3. 将`fiber`树的构造过程包装在一个回调函数中, 并将此回调函数传入到`scheduler`包等待调度.
    3. 渲染器
-      `react-dom`包, 有 2 个核心职责:
-      1. 引导`react`应用的启动(通过`ReactDOM.render`).
-      2. 实现[`HostConfig`协议](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/README.md#practical-examples)([源码在 ReactDOMHostConfig.js 中](https://github.com/facebook/react/blob/v17.0.2/packages/react-dom/src/client/ReactDOMHostConfig.js)), 能够将`react-reconciler`包构造出来的`fiber`树表现出来, 生成 dom 节点(浏览器中), 生成字符串(ssr).
+      `react-dom` + `react-dom-bindings`包, 有 2 个核心职责:
+      1. 引导`react`应用的启动(通过`createRoot(rootDom).render(<App/>)`).
+      2. 实现[`HostConfig`协议](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/README.md#practical-examples)(源码集中在[`react-dom-bindings/src/client/ReactFiberConfigDOM.js`](https://github.com/facebook/react/blob/v19.2.6/packages/react-dom-bindings/src/client/ReactFiberConfigDOM.js)中), 能够将`react-reconciler`包构造出来的`fiber`树表现出来, 生成 dom 节点(浏览器中), 生成字符串(ssr).
 
 注意:
 

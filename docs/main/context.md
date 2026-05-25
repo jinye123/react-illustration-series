@@ -10,26 +10,24 @@ order: 4
 
 有关`Context`的用法, 请直接查看官方文档, 本文将从`fiber树构造`的视角, 分析`Context`的实现原理.
 
+> v17 → v19 重大变化:
+>
+> 1. **删除 `calculateChangedBits / observedBits`**(unstable api, v18 已废弃): `context`对象不再有`_calculateChangedBits`字段, `propagateContextChange`不再需要按位比较, 直接用`Object.is(oldValue, newValue)`判断.
+> 2. **Provider 简写**(v19): 直接渲染`<MyContext>`即等同于`<MyContext.Provider>`, 不再需要`.Provider`. `<MyContext.Consumer>`仍然兼容.
+> 3. **懒传播(lazy propagation)**(v18 引入): 改变 context value 后, 不再立即向下扫描所有 consumer, 而是分两步: (a) 在 ContextProvider 处仅设置后代搜索 lane; (b) 在`beginWork`阶段如果 fiber 命中 lane, 通过`checkIfContextChanged(currentDependencies)`比对每个 dependency 的`memoizedValue`决定是否进入 render.
+> 4. **`use(Context)`**(v19): 新增条件可调用的`use(MyContext)`api, 内部走的也是`readContext`路径.
+> 5. **`dependencies`字段简化**: 删除`responders`字段(legacy events api 移除), 删除`observedBits`字段.
+
 ## 创建 Context
 
-根据官网示例, 通过`React.createContext`这个 api 来创建`context`对象. 在[createContext](https://github.com/facebook/react/blob/v17.0.2/packages/react/src/ReactContext.js#L14-L152)中, 可以看到`context`对象的数据结构:
+根据官网示例, 通过`React.createContext`这个 api 来创建`context`对象. 在[createContext](https://github.com/facebook/react/blob/v19.2.6/packages/react/src/ReactContext.js)中, 可以看到`context`对象的数据结构:
 
 ```js
-export function createContext<T>(
-  defaultValue: T,
-  calculateChangedBits: ?(a: T, b: T) => number,
-): ReactContext<T> {
-  if (calculateChangedBits === undefined) {
-    calculateChangedBits = null;
-  }
+// v19 简化版
+export function createContext<T>(defaultValue: T): ReactContext<T> {
   const context: ReactContext<T> = {
     $$typeof: REACT_CONTEXT_TYPE,
-    _calculateChangedBits: calculateChangedBits,
-    // As a workaround to support multiple concurrent renderers, we categorize
-    // some renderers as primary and others as secondary. We only expect
-    // there to be two concurrent renderers at most: React Native (primary) and
-    // Fabric (secondary); React DOM (primary) and React ART (secondary).
-    // Secondary renderers store their context values on separate fields.
+    // 保存 2 个 value 是为了支持多个渲染器并发渲染 (Primary / Secondary)
     _currentValue: defaultValue,
     _currentValue2: defaultValue,
     _threadCount: 0,
@@ -37,23 +35,42 @@ export function createContext<T>(
     Consumer: (null: any),
   };
 
-  context.Provider = {
-    $$typeof: REACT_PROVIDER_TYPE,
-    _context: context,
-  };
-  context.Consumer = context;
+  if (enableRenderableContext) {
+    // v19 默认开启: context 自身可以作为 Provider 使用
+    context.Provider = context;
+    context.Consumer = {
+      $$typeof: REACT_CONSUMER_TYPE,
+      _context: context,
+    };
+  } else {
+    // v18 旧路径
+    context.Provider = {
+      $$typeof: REACT_PROVIDER_TYPE,
+      _context: context,
+    };
+    context.Consumer = context;
+  }
   return context;
 }
 ```
 
 `createContext`核心逻辑:
 
-- 其初始值保存在`context._currentValue`(同时保存到`context._currentValue2`. 英文注释已经解释, 保存 2 个 value 是为了支持多个渲染器并发渲染)
-- 同时创建了`context.Provider`, `context.Consumer`2 个`reactElement`对象.
+- 其初始值保存在`context._currentValue`(同时保存到`context._currentValue2`. 保存 2 个 value 是为了支持多个渲染器并发渲染).
+- 字段缩减: v19 中**移除**了`_calculateChangedBits`字段(已废弃).
+- v19 起开启`enableRenderableContext`后, `context.Provider === context`, 也就是说`<MyContext value={...}>{children}</MyContext>`和`<MyContext.Provider value={...}>{children}</MyContext.Provider>`完全等价.
 
-比如, 创建`const MyContext = React.createContext(defaultValue);`, 之后使用`<MyContext.Provider value={/* 某个值 */}>`声明一个`ContextProvider`类型的组件.
+比如, 创建`const MyContext = React.createContext(defaultValue);`, 之后使用以下任一形式都可声明一个`ContextProvider`类型的组件:
 
-在`fiber树渲染`时, 在`beginWork`中`ContextProvider`类型的节点对应的处理函数是[updateContextProvider](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberBeginWork.old.js#L2842-L2898):
+```jsx
+// v19 推荐: Provider 简写
+<MyContext value={someValue}>{children}</MyContext>
+
+// 兼容写法
+<MyContext.Provider value={someValue}>{children}</MyContext.Provider>
+```
+
+在`fiber树渲染`时, 在`beginWork`中`ContextProvider`类型的节点对应的处理函数是[updateContextProvider](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberBeginWork.js):
 
 ```js
 function beginWork(
@@ -103,20 +120,29 @@ function updateContextProvider(
 
 ### context.\_currentValue 存储
 
-注意`updateContextProvider -> pushProvider`中的[pushProvider(workInProgress, newValue)](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberNewContext.old.js#L75-L113):
+注意`updateContextProvider -> pushProvider`中的[pushProvider(providerFiber, context, nextValue)](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberNewContext.js):
 
 ```js
-// ...省略无关代码
-export function pushProvider<T>(providerFiber: Fiber, nextValue: T): void {
-  const context: ReactContext<T> = providerFiber.type._context;
-  push(valueCursor, context._currentValue, providerFiber);
-  context._currentValue = nextValue;
+// v19 简化版: 入参从 (providerFiber, nextValue) 改为 (providerFiber, context, nextValue),
+// 因为 v19 起 Provider 可以直接就是 context 本身, 不再能从 providerFiber.type._context 推断
+export function pushProvider<T>(
+  providerFiber: Fiber,
+  context: ReactContext<T>,
+  nextValue: T,
+): void {
+  if (isPrimaryRenderer) {
+    push(valueCursor, context._currentValue, providerFiber);
+    context._currentValue = nextValue;
+  } else {
+    push(valueCursor, context._currentValue2, providerFiber);
+    context._currentValue2 = nextValue;
+  }
 }
 ```
 
 `pushProvider`实际上是一个存储函数, 利用`栈`的特性, 先把`context._currentValue`压栈, 之后更新`context._currentValue = nextValue`.
 
-与`pushProvider`对应的还有[popProvider](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberNewContext.old.js#L115-L126), 同样利用`栈`的特性, 把`栈`中的值弹出, 还原到`context._currentValue`中.
+与`pushProvider`对应的还有[popProvider](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberNewContext.js), 同样利用`栈`的特性, 把`栈`中的值弹出, 还原到`context._currentValue`中.
 
 本节重点分析`Context Api`在`fiber树构造`过程中的作用. 有关`pushProvider/popProvider`的具体实现过程(栈存储), 在[React 算法之栈操作](../algorithm/stack.md#context)中有详细图解.
 
@@ -124,11 +150,11 @@ export function pushProvider<T>(providerFiber: Fiber, nextValue: T): void {
 
 使用了`MyContext.Provider`组件之后, 在`fiber树构造`过程中, context 的值会被`ContextProvider`类型的`fiber`节点所更新. 在后续的过程中, 如何读取`context._currentValue`?
 
-在`react`中, 共提供了 3 种方式可以消费`Context`:
+在`react`中, 共提供了 4 种方式可以消费`Context`:
 
-1. 使用`MyContext.Consumer`组件: 用于`JSX`. 如, `<MyContext.Consumer>(value)=>{}</MyContext.Consumer>`
+1. 使用`MyContext.Consumer`组件: 用于`JSX`. 如, `<MyContext.Consumer>{(value) => ...}</MyContext.Consumer>`
 
-   - `beginWork`中, 对于`ContextConsumer`类型的节点, 对应的处理函数是[updateContextConsumer](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberBeginWork.old.js#L2902-L2963)
+   - `beginWork`中, 对于`ContextConsumer`类型的节点, 对应的处理函数是[updateContextConsumer](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberBeginWork.js)
 
    ```js
    function updateContextConsumer(
@@ -137,46 +163,58 @@ export function pushProvider<T>(providerFiber: Fiber, nextValue: T): void {
      renderLanes: Lanes,
    ) {
      let context: ReactContext<any> = workInProgress.type;
+     // v19 启用 renderableContext 后, workInProgress.type 指向的是 ConsumerObject, 需要拿 _context
+     if (enableRenderableContext) {
+       context = (workInProgress.type: any)._context;
+     }
      const newProps = workInProgress.pendingProps;
      const render = newProps.children;
 
-     // 读取context
+     // 读取 context (v19 无 observedBits 参数)
      prepareToReadContext(workInProgress, renderLanes);
-     const newValue = readContext(context, newProps.unstable_observedBits);
-     let newChildren;
+     const newValue = readContext(context);
 
      // ...省略无关代码
    }
    ```
 
-2. 使用`useContext`: 用于`function`中. 如, `const value = useContext(MyContext)`
+2. 使用`useContext(MyContext)`: 用于`function`组件中.
 
-   - 进入`updateFunctionComponent`后, 会调用`prepareToReadContext`
-   - 无论是初次[创建阶段](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1780), 还是[更新阶段](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1801), `useContext`都直接调用了`readContext`
+   - 进入`updateFunctionComponent`后, 会调用`prepareToReadContext`.
+   - 无论是初次[创建阶段](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)还是[更新阶段](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js), `useContext`都直接调用了`readContext`.
 
-3. `class`组件中, 使用一个静态属性`contextType`: 用于`class`组件中获取`context`. 如, `MyClass.contextType = MyContext;`
-   - 进入`updateClassComponent`后, 会调用`prepareToReadContext`
-   - 无论[constructClassInstance](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberClassComponent.old.js#L573),[mountClassInstance](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberClassComponent.old.js#L807), [updateClassInstance](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberClassComponent.old.js#L1031)内部都调用`context = readContext((contextType: any));`
+3. **v19 新增: `use(MyContext)`**: 唯一允许在条件/循环中调用的 hook. 与`useContext`的区别在于`use`不在 hook 调用顺序上, 而是在调用现场即时读取, 适合在`if`分支中按需读 context.
 
-所以这 3 种方式只是`react`根据不同使用场景封装的`api`, 内部都会调用[prepareToReadContext](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberNewContext.old.js#L297-L317)和[readContext(contextType)](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberNewContext.old.js#L319-L381).
+   ```js
+   function MyComp() {
+     if (someCondition) {
+       const value = use(MyContext); // ✅ 合法
+       return value;
+     }
+     return null;
+   }
+   ```
+
+4. `class`组件中, 使用一个静态属性`contextType`: 用于`class`组件中获取`context`. 如, `MyClass.contextType = MyContext;`
+   - 进入`updateClassComponent`后, 会调用`prepareToReadContext`.
+   - 无论`constructClassInstance / mountClassInstance / updateClassInstance`内部都调用`context = readContext((contextType: any));`(详见[ReactFiberClassComponent.js](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberClassComponent.js)).
+
+所以这 4 种方式只是`react`根据不同使用场景封装的`api`, 内部都会调用[prepareToReadContext](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberNewContext.js)和[readContext](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberNewContext.js).
 
 ```js
-// ... 省略无关代码
+// v19 简化版
 export function prepareToReadContext(
   workInProgress: Fiber,
   renderLanes: Lanes,
 ): void {
-  // 1. 设置全局变量, 为readContext做准备
   currentlyRenderingFiber = workInProgress;
   lastContextDependency = null;
-  lastContextWithAllBitsObserved = null;
+  // v18+: 移除了 lastContextWithAllBitsObserved (observedBits 已删除)
 
   const dependencies = workInProgress.dependencies;
   if (dependencies !== null) {
-    const firstContext = dependencies.firstContext;
-    if (firstContext !== null) {
+    if (dependencies.firstContext !== null) {
       if (includesSomeLane(dependencies.lanes, renderLanes)) {
-        // Context list has a pending update. Mark that this fiber performed work.
         markWorkInProgressReceivedUpdate();
       }
       // Reset the work-in-progress list
@@ -184,70 +222,83 @@ export function prepareToReadContext(
     }
   }
 }
-// ... 省略无关代码
-export function readContext<T>(
+
+export function readContext<T>(context: ReactContext<T>): T {
+  return readContextForConsumer(currentlyRenderingFiber, context);
+}
+
+function readContextForConsumer<T>(
+  consumer: Fiber | null,
   context: ReactContext<T>,
-  observedBits: void | number | boolean,
 ): T {
+  const value = isPrimaryRenderer
+    ? context._currentValue
+    : context._currentValue2;
   const contextItem = {
     context: ((context: any): ReactContext<mixed>),
-    observedBits: resolvedObservedBits,
+    memoizedValue: value, // v18+ 新增: 记录读取时的 value, 用于懒传播比对
     next: null,
   };
-  // 1. 构造一个contextItem, 加入到 workInProgress.dependencies链表之后
+
   if (lastContextDependency === null) {
     lastContextDependency = contextItem;
-    currentlyRenderingFiber.dependencies = {
+    consumer.dependencies = {
       lanes: NoLanes,
       firstContext: contextItem,
-      responders: null,
     };
   } else {
     lastContextDependency = lastContextDependency.next = contextItem;
   }
-  // 2. 返回 currentValue
-  return isPrimaryRenderer ? context._currentValue : context._currentValue2;
+  return value;
 }
 ```
+
+> v17 → v19 字段变更:
+>
+> - `contextItem.observedBits` 删除.
+> - `contextItem.memoizedValue` 新增, 是懒传播的关键: 在 beginWork 时通过`Object.is(memoizedValue, latestValue)`决定该 consumer 是否需要 re-render.
+> - `dependencies.responders` 删除.
 
 核心逻辑:
 
 1. `prepareToReadContext`: 设置`currentlyRenderingFiber = workInProgress`, 并重置`lastContextDependency`等全局变量.
-2. `readContext`: 返回`context._currentValue`, 并构造一个`contextItem`添加到`workInProgress.dependencies`链表之后.
+2. `readContext`: 返回`context._currentValue`, 并构造一个`contextItem`添加到`workInProgress.dependencies`链表之后. 同时把当前读到的`value`记录到`contextItem.memoizedValue`供更新阶段比对.
 
-注意: 这个`readContext`并不是纯函数, 它还有一些副作用, 会更改`workInProgress.dependencies`, 其中`contextItem.context`保存了当前`context`的引用. 这个`dependencies`属性会在更新时使用, 用于判定是否依赖了`ContextProvider`中的值.
+注意: 这个`readContext`并不是纯函数, 它还有一些副作用, 会更改`workInProgress.dependencies`. 这个`dependencies`属性会在更新时使用, 用于判定是否依赖了`ContextProvider`中的值, 以及判断该 consumer 是否需要 re-render.
 
-返回`context._currentValue`之后, 之后继续进行`fiber树构造`直到全部完成即可.
+返回`context._currentValue`之后, 继续进行`fiber树构造`直到全部完成即可.
 
 ## 更新 Context
 
-来到更新阶段, 同样进入`updateContextConsumer`
+来到更新阶段, 再次进入`updateContextProvider`. v18+ 这一段代码做了显著简化(`changedBits`已删除):
 
 ```js
+// v19 简化版
 function updateContextProvider(
   current: Fiber | null,
   workInProgress: Fiber,
   renderLanes: Lanes,
 ) {
-  const providerType: ReactProviderType<any> = workInProgress.type;
-  const context: ReactContext<any> = providerType._context;
-
-  const newProps = workInProgress.pendingProps;
+  let context: ReactContext<any>;
+  let newValue;
+  if (enableRenderableContext) {
+    context = (workInProgress.type: any);
+    newValue = workInProgress.pendingProps.value;
+  } else {
+    context = workInProgress.type._context;
+    newValue = workInProgress.pendingProps.value;
+  }
   const oldProps = workInProgress.memoizedProps;
 
-  const newValue = newProps.value;
-
-  pushProvider(workInProgress, newValue);
+  // 进入栈帧 (v19 入参从 (fiber, value) 改为 (fiber, context, value))
+  pushProvider(workInProgress, context, newValue);
 
   if (oldProps !== null) {
-    // 更新阶段进入
     const oldValue = oldProps.value;
-    // 对比 newValue 和 oldValue
-    const changedBits = calculateChangedBits(context, newValue, oldValue);
-    if (changedBits === 0) {
-      // value没有变动, 进入 Bailout 逻辑
+    if (is(oldValue, newValue)) {
+      // value 没有变动, 进入 Bailout 逻辑
       if (
-        oldProps.children === newProps.children &&
+        oldProps.children === workInProgress.pendingProps.children &&
         !hasLegacyContextChanged()
       ) {
         return bailoutOnAlreadyFinishedWork(
@@ -257,127 +308,80 @@ function updateContextProvider(
         );
       }
     } else {
-      // value变动, 查找对应的consumers, 并使其能够被更新
-      propagateContextChange(workInProgress, context, changedBits, renderLanes);
+      // value 变动, 触发懒传播标记
+      propagateContextChange(workInProgress, context, renderLanes);
     }
   }
-  // ... 省略无关代码
+  const newChildren = workInProgress.pendingProps.children;
+  reconcileChildren(current, workInProgress, newChildren, renderLanes);
+  return workInProgress.child;
 }
 ```
 
 核心逻辑:
 
-1. `value`没有改变, 直接进入`Bailout`(可以回顾[fiber 树构造(对比更新)](./fibertree-update.md#bailout)中对`bailout`的解释).
-2. `value`改变, 调用`propagateContextChange`
+1. `value`没有改变(`Object.is(oldValue, newValue) === true`), 直接进入`Bailout`(可以回顾[fiber 树构造(对比更新)](./fibertree-update.md#bailout)中对`bailout`的解释).
+2. `value`改变, 调用`propagateContextChange`(v18+ 是"懒传播"版本).
 
-[propagateContextChange](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberNewContext.old.js#L182-L295):
+### 懒传播 (Lazy Propagation)
+
+v18 起, `propagateContextChange`的策略发生了重大变化([#20890](https://github.com/facebook/react/pull/20890)):
+
+- **v17 (Eager Propagation)**: 在`updateContextProvider`时立即向下深度遍历整棵子树, 找到所有依赖该 context 的 consumer fiber, 给它们的`fiber.lanes`标上`renderLanes`, 并沿`fiber.return`路径上把`childLanes`补齐. 这种做法在 consumer 数量多时会造成 O(N) 的同步开销.
+- **v18+ (Lazy Propagation)**: `propagateContextChange`不再立即下钻到 consumer, 而是:
+  1. 将子树所有"已 bailout 过的"分支重新打上`renderLanes`(只标 lane, 不修改 dependencies).
+  2. 然后由后续的`beginWork`正常往下走, 在每个 fiber 的 dependencies 上做`memoizedValue`和`latestValue`的逐项`Object.is`比对. 命中变化的 consumer 才会`markWorkInProgressReceivedUpdate`触发 re-render. 这样跳过整棵无关子树时仍然是 O(1).
+
+[propagateContextChange_eager / propagateParentContextChanges](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberNewContext.js):
 
 ```js
-export function propagateContextChange(
+// v19 简化版 propagateContextChange
+function propagateContextChange<T>(
   workInProgress: Fiber,
-  context: ReactContext<mixed>,
-  changedBits: number,
+  context: ReactContext<T>,
   renderLanes: Lanes,
 ): void {
-  let fiber = workInProgress.child;
-  if (fiber !== null) {
-    // Set the return pointer of the child to the work-in-progress fiber.
-    fiber.return = workInProgress;
-  }
-  while (fiber !== null) {
-    let nextFiber;
-    const list = fiber.dependencies;
-    if (list !== null) {
-      nextFiber = fiber.child;
-      let dependency = list.firstContext;
-      while (dependency !== null) {
-        // 检查 dependency中依赖的context
-        if (
-          dependency.context === context &&
-          (dependency.observedBits & changedBits) !== 0
-        ) {
-          // 符合条件, 安排调度
-          if (fiber.tag === ClassComponent) {
-            // class 组件需要创建一个update对象, 添加到updateQueue队列
-            const update = createUpdate(
-              NoTimestamp,
-              pickArbitraryLane(renderLanes),
-            );
-            update.tag = ForceUpdate; // 注意ForceUpdate, 保证class组件一定执行render
-            enqueueUpdate(fiber, update);
-          }
-          fiber.lanes = mergeLanes(fiber.lanes, renderLanes);
-          const alternate = fiber.alternate;
-          if (alternate !== null) {
-            alternate.lanes = mergeLanes(alternate.lanes, renderLanes);
-          }
-          // 向上
-          scheduleWorkOnParentPath(fiber.return, renderLanes);
+  // 注意: 这是懒传播版本, 不再向 consumer 节点写 lanes
+  // 只把所有已经 bailout 过的子树重新打上 renderLanes, 让它们进入 beginWork 检查 dependencies
+  propagateContextChange_eager(workInProgress, context, renderLanes);
+}
 
-          // 标记优先级
-          list.lanes = mergeLanes(list.lanes, renderLanes);
-
-          // 退出查找
-          break;
-        }
-        dependency = dependency.next;
-      }
+// beginWork 时, 检查 fiber 是否需要因 context 变化而 re-render
+export function checkIfContextChanged(
+  currentDependencies: Dependencies,
+): boolean {
+  let dependency = currentDependencies.firstContext;
+  while (dependency !== null) {
+    const context = dependency.context;
+    const newValue = isPrimaryRenderer
+      ? context._currentValue
+      : context._currentValue2;
+    const oldValue = dependency.memoizedValue;
+    if (!is(newValue, oldValue)) {
+      return true; // 命中变化, 需要 re-render
     }
-
-    // ...省略无关代码
-    // ...省略无关代码
-
-    fiber = nextFiber;
+    dependency = dependency.next;
   }
+  return false;
 }
 ```
 
-`propagateContextChange`源码比较长, 核心逻辑如下:
+`scheduleContextWorkOnParentPath`(v18+ 重命名)与[markUpdateLaneFromFiberToRoot](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberConcurrentUpdates.js)的作用相似, 具体可以回顾[fiber 树构造(对比更新)](./fibertree-update.md#markUpdateLaneFromFiberToRoot).
 
-1. 向下遍历: 从`ContextProvider`类型的节点开始, 向下查找所有`fiber.dependencies`依赖该`context`的节点(假设叫做`consumer`).
-2. 向上遍历: 从`consumer`节点开始, 向上遍历, 修改父路径上所有节点的`fiber.childLanes`属性, 表明其子节点有改动, 子节点会进入更新逻辑.
-
-   - 这一步通过调用[scheduleWorkOnParentPath(fiber.return, renderLanes)](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberNewContext.old.js#L155-L180)实现.
-
-     ```js
-     export function scheduleWorkOnParentPath(
-       parent: Fiber | null,
-       renderLanes: Lanes,
-     ) {
-       // Update the child lanes of all the ancestors, including the alternates.
-       let node = parent;
-       while (node !== null) {
-         const alternate = node.alternate;
-         if (!isSubsetOfLanes(node.childLanes, renderLanes)) {
-           node.childLanes = mergeLanes(node.childLanes, renderLanes);
-           if (alternate !== null) {
-             alternate.childLanes = mergeLanes(
-               alternate.childLanes,
-               renderLanes,
-             );
-           }
-         } else if (
-           alternate !== null &&
-           !isSubsetOfLanes(alternate.childLanes, renderLanes)
-         ) {
-           alternate.childLanes = mergeLanes(alternate.childLanes, renderLanes);
-         } else {
-           // Neither alternate was updated, which means the rest of the
-           // ancestor path already has sufficient priority.
-           break;
-         }
-         node = node.return;
-       }
-     }
-     ```
-
-   - `scheduleWorkOnParentPath`与[markUpdateLaneFromFiberToRoot](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberWorkLoop.old.js#L625-L667)的作用相似, 具体可以回顾[fiber 树构造(对比更新)](./fibertree-update.md#markUpdateLaneFromFiberToRoot)
-
-通过以上 2 个步骤, 保证了所有消费该`context`的子节点都会被重新构造, 进而保证了状态的一致性, 实现了`context`更新.
+通过以上设计, 保证了所有消费该`context`的子节点都会被重新检查, 进而保证了状态的一致性, 实现了`context`更新, 同时把"扫描代价"延后到了真正的`beginWork`阶段, 大大降低了 provider 切换时的同步开销.
 
 ## 总结
 
-`Context`的实现思路还是比较清晰, 总体分为 2 步.
+`Context`的实现思路还是比较清晰, v19 中总体分为 3 步.
 
-1. 在消费状态时,`ContextConsumer`节点调用`readContext(MyContext)`获取最新状态.
-2. 在更新状态时, 由`ContextProvider`节点负责查找所有`ContextConsumer`节点, 并设置消费节点的父路径上所有节点的`fiber.childLanes`, 保证消费节点可以得到更新.
+1. **消费**: `ContextConsumer / useContext / use / contextType`内部都调用`readContext(MyContext)`, 把当前 value 写入`fiber.dependencies`链表的`memoizedValue`字段.
+2. **变更标记**: `Provider`收到新 value 时调用`propagateContextChange`(懒传播), 仅把已 bailout 的分支重新打上`renderLanes`, **不**直接修改 consumer 的`fiber.lanes`.
+3. **变更校验**: 后续`beginWork`沿正常路径执行, 遇到打过 lanes 的分支时通过`checkIfContextChanged(currentDependencies)`逐项比对`memoizedValue`和最新`_currentValue`, 命中变化的 consumer 才 re-render.
+
+v17 → v19 重要差异汇总:
+
+1. `_calculateChangedBits / observedBits / changedBits` 全部删除.
+2. `pushProvider`签名从`(fiber, value)`变更为`(fiber, context, value)`.
+3. v19 起`<MyContext value>`简写等价于`<MyContext.Provider value>`.
+4. 引入 `dependency.memoizedValue` 字段, 配合"懒传播 + beginWork 阶段校验"模式.
+5. 新增 `use(Context)`api, 支持条件读取.

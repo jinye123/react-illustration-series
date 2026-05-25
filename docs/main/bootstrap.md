@@ -12,38 +12,38 @@ order: 1
 
 在正式分析源码之前, 先了解一下`react`应用的`启动模式`:
 
-在当前稳定版`react@17.0.2`源码中, 有 3 种启动方式. 先引出官网上对于[这 3 种模式的介绍](https://zh-hans.reactjs.org/docs/concurrent-mode-adoption.html#why-so-many-modes), 其基本说明如下:
+> 历史背景: 在`react@17`时代, 共有 3 种启动模式(`legacy`、`blocking`、`concurrent`), 对应 3 套 RootTag 与 mode 位; 自`react@18`起官方移除了`ReactDOM.render`与`createBlockingRoot`, 只剩 2 种启动方式: `createRoot`(默认开启`Concurrent`渲染) 与 `hydrateRoot`(SSR 场景的同构启动). 业务代码无法再走 v17 的 legacy 路径, react 内部仅在某些 SSR/单元测试桥接位置保留`LegacyRoot`枚举.
 
-1. `legacy` 模式: `ReactDOM.render(<App />, rootNode)`. 这是当前 React app 使用的方式. 这个模式可能不支持[这些新功能(concurrent 支持的所有功能)](https://zh-hans.reactjs.org/docs/concurrent-mode-patterns.html#the-three-steps).
+`react@19.2.6`中暴露的启动 api 如下:
 
-   ```js
-   // LegacyRoot
-   ReactDOM.render(<App />, document.getElementById('root'), (dom) => {}); // 支持callback回调, 参数是一个dom对象
-   ```
-
-2. [Blocking 模式](https://zh-hans.reactjs.org/docs/concurrent-mode-adoption.html#migration-step-blocking-mode): `ReactDOM.createBlockingRoot(rootNode).render(<App />)`. 目前正在实验中, 它仅提供了 `concurrent` 模式的小部分功能, 作为迁移到 `concurrent` 模式的第一个步骤.
+1. **`createRoot`**: 客户端首次渲染. 创建一个`ReactDOMRoot`实例, 通过实例的`render`方法引导启动, 默认为`ConcurrentRoot`.
 
    ```js
-   // BlockingRoot
-   // 1. 创建ReactDOMRoot对象
-   const reactDOMBlockingRoot = ReactDOM.createBlockingRoot(
-     document.getElementById('root'),
-   );
-   // 2. 调用render
-   reactDOMBlockingRoot.render(<App />); // 不支持回调
+   import { createRoot } from 'react-dom/client';
+
+   // 1. 创建 ReactDOMRoot 对象
+   const root = createRoot(document.getElementById('root'));
+   // 2. 调用 render (不再支持 callback, 这是与 v17 ReactDOM.render 的主要差异)
+   root.render(<App />);
+   // 3. 卸载
+   // root.unmount();
    ```
 
-3. [Concurrent 模式](https://zh-hans.reactjs.org/docs/concurrent-mode-adoption.html#enabling-concurrent-mode): `ReactDOM.createRoot(rootNode).render(<App />)`. 目前在实验中, 未来稳定之后，打算作为 React 的默认开发模式. 这个模式开启了所有的新功能.
+2. **`hydrateRoot`**: SSR 同构启动. 创建一个`ReactDOMHydrationRoot`实例, 用于复用服务端渲染产生的 DOM 结构.
 
    ```js
-   // ConcurrentRoot
-   // 1. 创建ReactDOMRoot对象
-   const reactDOMRoot = ReactDOM.createRoot(document.getElementById('root'));
-   // 2. 调用render
-   reactDOMRoot.render(<App />); // 不支持回调
+   import { hydrateRoot } from 'react-dom/client';
+
+   // hydrateRoot 把 <App/> 作为第二个参数直接传入, 一步到位
+   const root = hydrateRoot(document.getElementById('root'), <App />);
+   // 后续如果需要触发整树更新, 仍然走 root.render(<App />)
    ```
 
-注意: 虽然`17.0.2`的源码中有[`createRoot`和`createBlockingRoot`方法](https://github.com/facebook/react/blob/v17.0.2/packages/react-dom/src/client/ReactDOM.js#L202)(如果自行构建, [会默认构建`experimental`版本](https://github.com/facebook/react/blob/v17.0.2/scripts/rollup/build.js#L30-L35)), 但是稳定版的构建入口[排除掉了这两个 api](https://github.com/facebook/react/blob/v17.0.2/packages/react-dom/index.stable.js), 所以实际在`npm i react-dom`安装`17.0.2`稳定版后, 不能使用该 api.如果要想体验非`legacy`模式, 需要[显示安装 alpha 版本](https://github.com/reactwg/react-18/discussions/9)(或自行构建).
+注意:
+
+- 自 v18 起, `createRoot` / `hydrateRoot` 一律导出自`react-dom/client`子路径(不再是`react-dom`顶级).
+- v17 中的`ReactDOM.render(<App/>, container)`已删除. 若工程升级时仍调用该 API, react 会在控制台抛出一次性的 deprecation 警告并直接报错.
+- v17 中的`createBlockingRoot` / `createMutableSource` / `unstable_*` 系列实验 API 已全部移除.
 
 ## 启动流程
 
@@ -53,18 +53,18 @@ order: 1
 
 ### 创建全局对象 {#create-global-obj}
 
-无论`Legacy, Concurrent或Blocking`模式, react 在初始化时, 都会创建 3 个全局对象
+无论使用`createRoot`还是`hydrateRoot`, react 在初始化时, 都会创建 3 个全局对象:
 
-1. [`ReactDOM(Blocking)Root`对象](https://github.com/facebook/react/blob/v17.0.2/packages/react-dom/src/client/ReactDOMRoot.js#L62-L72)
+1. [`ReactDOMRoot` / `ReactDOMHydrationRoot` 对象](https://github.com/facebook/react/blob/v19.2.6/packages/react-dom/src/client/ReactDOMRoot.js)
 
-- 属于`react-dom`包, 该对象[暴露有`render,unmount`方法](https://github.com/facebook/react/blob/v17.0.2/packages/react-dom/src/client/ReactDOMRoot.js#L62-L104), 通过调用该实例的`render`方法, 可以引导 react 应用的启动.
+   - 属于`react-dom`包. 实例上暴露`render`和`unmount`方法, 通过调用`render`方法可以引导 react 应用启动.
 
-2. [`fiberRoot`对象](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberRoot.old.js#L83-L103)
+2. [`fiberRoot` 对象](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberRoot.js)
 
    - 属于`react-reconciler`包, 作为`react-reconciler`在运行过程中的全局上下文, 保存 fiber 构建过程中所依赖的全局状态.
-   - 其大部分实例变量用来存储`fiber 构造循环`(详见[`两大工作循环`](./workloop.md))过程的各种状态.react 应用内部, 可以根据这些实例变量的值, 控制执行逻辑.
+   - 其大部分实例变量用来存储`fiber 构造循环`(详见[`两大工作循环`](./workloop.md))过程的各种状态. react 应用内部, 可以根据这些实例变量的值, 控制执行逻辑.
 
-3. [`HostRootFiber`对象](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiber.old.js#L431-L449)
+3. [`HostRootFiber` 对象](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiber.js)
    - 属于`react-reconciler`包, 这是 react 应用中的第一个 Fiber 对象, 是 Fiber 树的根节点, 节点的类型是`HostRoot`.
 
 这 3 个对象是 react 体系得以运行的基本保障, 一经创建大多数场景不会再销毁(除非卸载整个应用`root.unmount()`).
@@ -73,297 +73,212 @@ order: 1
 
 ![](../../snapshots/bootstrap/function-call.png)
 
+> 注: 该图绘制于 v17 时期, 当时分 legacy/blocking/concurrent 三条线; v19 中只剩 `createRoot → ReactDOMRoot → createContainer → createFiberRoot → createHostRootFiber` 一条线, 图待重绘.
+
 下面逐一解释这 3 个对象的创建过程.
 
-### 创建 ReactDOM(Blocking)Root 对象
+### 创建 ReactDOMRoot 对象
 
-由于 3 种模式启动的 api 有所不同, 所以从源码上追踪, 也对应了 3 种方式. 最终都 new 一个`ReactDOMRoot`或`ReactDOMBlockingRoot`的实例, 需要创建过程中`RootTag`参数, 3 种模式各不相同. 该`RootTag`的类型决定了整个 react 应用是否支持[可中断渲染(后文有解释)](#可中断渲染).
-
-下面根据 3 种 mode 下的启动函数逐一分析.
-
-#### legacy 模式
-
-`legacy`模式表面上是直接调用`ReactDOM.render`, 跟踪`ReactDOM.render`后续调用`legacyRenderSubtreeIntoContainer`([源码链接](https://github.com/facebook/react/blob/v17.0.2/packages/react-dom/src/client/ReactDOMLegacy.js#L175-L222))
-
-```js
-function legacyRenderSubtreeIntoContainer(
-  parentComponent: ?React$Component<any, any>,
-  children: ReactNodeList,
-  container: Container,
-  forceHydrate: boolean,
-  callback: ?Function,
-) {
-  let root: RootType = (container._reactRootContainer: any);
-  let fiberRoot;
-  if (!root) {
-    // 初次调用, root还未初始化, 会进入此分支
-    //1. 创建ReactDOMRoot对象, 初始化react应用环境
-    root = container._reactRootContainer = legacyCreateRootFromDOMContainer(
-      container,
-      forceHydrate,
-    );
-    fiberRoot = root._internalRoot;
-    if (typeof callback === 'function') {
-      const originalCallback = callback;
-      callback = function () {
-        // instance最终指向 children(入参: 如<App/>)生成的dom节点
-        const instance = getPublicRootInstance(fiberRoot);
-        originalCallback.call(instance);
-      };
-    }
-    // 2. 更新容器
-    unbatchedUpdates(() => {
-      updateContainer(children, fiberRoot, parentComponent, callback);
-    });
-  } else {
-    // root已经初始化, 二次调用render会进入
-    // 1. 获取FiberRoot对象
-    fiberRoot = root._internalRoot;
-    if (typeof callback === 'function') {
-      const originalCallback = callback;
-      callback = function () {
-        const instance = getPublicRootInstance(fiberRoot);
-        originalCallback.call(instance);
-      };
-    }
-    // 2. 调用更新
-    updateContainer(children, fiberRoot, parentComponent, callback);
-  }
-  return getPublicRootInstance(fiberRoot);
-}
-```
-
-继续跟踪`legacyCreateRootFromDOMContainer`. 最后调用`new ReactDOMBlockingRoot(container, LegacyRoot, options);`
-
-```js
-function legacyCreateRootFromDOMContainer(
-  container: Container,
-  forceHydrate: boolean,
-): RootType {
-  const shouldHydrate =
-    forceHydrate || shouldHydrateDueToLegacyHeuristic(container);
-  return createLegacyRoot(
-    container,
-    shouldHydrate
-      ? {
-          hydrate: true,
-        }
-      : undefined,
-  );
-}
-
-export function createLegacyRoot(
-  container: Container,
-  options?: RootOptions,
-): RootType {
-  return new ReactDOMBlockingRoot(container, LegacyRoot, options); // 注意这里的LegacyRoot是固定的, 并不是外界传入的
-}
-```
-
-通过以上分析,`legacy`模式下调用`ReactDOM.render`有 2 个核心步骤:
-
-1. 创建`ReactDOMBlockingRoot`实例(在 Concurrent 模式和 Blocking 模式中详细分析该类), 初始化 react 应用环境.
-2. 调用`updateContainer`进行更新.
-
-#### Concurrent 模式和 Blocking 模式
-
-`Concurrent`模式和`Blocking`模式从调用方式上直接可以看出
-
-1. 分别调用`ReactDOM.createRoot`和`ReactDOM.createBlockingRoot`创建`ReactDOMRoot`和`ReactDOMBlockingRoot`实例
-2. 调用`ReactDOMRoot`和`ReactDOMBlockingRoot`实例的`render`方法
+`createRoot` ([源码](https://github.com/facebook/react/blob/v19.2.6/packages/react-dom/src/client/ReactDOMRoot.js)) 的核心代码可简化为:
 
 ```js
 export function createRoot(
-  container: Container,
-  options?: RootOptions,
+  container: Element | Document | DocumentFragment,
+  options?: CreateRootOptions,
 ): RootType {
-  return new ReactDOMRoot(container, options);
+  // 1. 创建 fiberRoot, RootTag 固定为 ConcurrentRoot
+  const root = createContainer(
+    container,
+    ConcurrentRoot,
+    null, // hydrationCallbacks
+    isStrictMode, // 来自 options
+    concurrentUpdatesByDefaultOverride,
+    identifierPrefix,
+    onUncaughtError,
+    onCaughtError,
+    onRecoverableError,
+    transitionCallbacks,
+  );
+  // 2. 在容器 DOM 节点上标记 fiber, 方便事件系统反查
+  markContainerAsRoot(root.current, container);
+  // 3. 把事件系统监听一次性挂到容器上 (delegated events)
+  const rootContainerElement =
+    container.nodeType === COMMENT_NODE ? container.parentNode : container;
+  listenToAllSupportedEvents(rootContainerElement);
+
+  // 4. 返回包装对象, 实例上挂 render / unmount
+  return new ReactDOMRoot(root);
 }
 
-export function createBlockingRoot(
-  container: Container,
-  options?: RootOptions,
-): RootType {
-  return new ReactDOMBlockingRoot(container, BlockingRoot, options); // 注意第2个参数BlockingRoot是固定写死的
+function ReactDOMRoot(internalRoot: FiberRoot) {
+  this._internalRoot = internalRoot;
 }
+ReactDOMRoot.prototype.render = function (children: ReactNodeList): void {
+  updateContainer(children, this._internalRoot, null, null);
+};
+ReactDOMRoot.prototype.unmount = function (): void {
+  const root = this._internalRoot;
+  const container = root.containerInfo;
+  updateContainer(null, root, null, () => {
+    unmarkContainerAsRoot(container);
+  });
+};
 ```
 
-继续查看`ReactDOMRoot`和`ReactDOMBlockingRoot`对象
+通过以上分析,`createRoot`有 4 个核心步骤:
 
-```js
-function ReactDOMRoot(container: Container, options: void | RootOptions) {
-  // 创建一个fiberRoot对象, 并将其挂载到this._internalRoot之上
-  this._internalRoot = createRootImpl(container, ConcurrentRoot, options);
-}
-function ReactDOMBlockingRoot(
-  container: Container,
-  tag: RootTag,
-  options: void | RootOptions,
-) {
-  // 创建一个fiberRoot对象, 并将其挂载到this._internalRoot之上
-  this._internalRoot = createRootImpl(container, tag, options);
-}
+1. 调用`createContainer`创建`fiberRoot`(注意`RootTag`固定为`ConcurrentRoot`).
+2. 把`fiberRoot.current`挂到容器节点上, 方便事件系统反查到对应 fiber.
+3. 把 React 支持的所有原生事件一次性代理到容器节点上(详见[合成事件原理](./synthetic-event.md)).
+4. `new ReactDOMRoot(...)` 包装出实例, 暴露`render`/`unmount`.
 
-ReactDOMRoot.prototype.render = ReactDOMBlockingRoot.prototype.render =
-  function (children: ReactNodeList): void {
-    const root = this._internalRoot;
-    // 执行更新
-    updateContainer(children, root, null, null);
-  };
-
-ReactDOMRoot.prototype.unmount = ReactDOMBlockingRoot.prototype.unmount =
-  function (): void {
-    const root = this._internalRoot;
-    const container = root.containerInfo;
-    // 执行更新
-    updateContainer(null, root, null, () => {
-      unmarkContainerAsRoot(container);
-    });
-  };
-```
-
-`ReactDOMRoot`和`ReactDOMBlockingRoot`有相同的特性
-
-1. 调用`createRootImpl`创建`fiberRoot`对象, 并将其挂载到`this._internalRoot`上.
-2. 原型上有`render`和`unmount`方法, 且内部都会调用`updateContainer`进行更新.
+`hydrateRoot`与`createRoot`几乎一致, 差别只在`RootTag`一致为`ConcurrentRoot`, 但创建`fiberRoot`时`hydrate: true`且把首次的`<App/>`存入根更新队列.
 
 ### 创建 fiberRoot 对象 {#create-root-impl}
 
-无论哪种模式下, 在`ReactDOM(Blocking)Root`的创建过程中, 都会调用一个相同的函数`createRootImpl`, 查看后续的函数调用, 最后会创建`fiberRoot 对象`(在这个过程中, 特别注意`RootTag`的传递过程):
-
-```js
-// 注意: 3种模式下的tag是各不相同(分别是ConcurrentRoot,BlockingRoot,LegacyRoot).
-this._internalRoot = createRootImpl(container, tag, options);
-```
-
-```js
-function createRootImpl(
-  container: Container,
-  tag: RootTag,
-  options: void | RootOptions,
-) {
-  // ... 省略部分源码(有关hydrate服务端渲染等, 暂时用不上)
-  // 1. 创建fiberRoot
-  const root = createContainer(container, tag, hydrate, hydrationCallbacks); // 注意RootTag的传递
-  // 2. 标记dom对象, 把dom和fiber对象关联起来
-  markContainerAsRoot(root.current, container);
-  // ...省略部分无关代码
-  return root;
-}
-```
+无论是`createRoot`还是`hydrateRoot`, 都会调用一个相同的函数`createContainer` → `createFiberRoot`([源码](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberRoot.js)):
 
 ```js
 export function createContainer(
   containerInfo: Container,
   tag: RootTag,
-  hydrate: boolean,
   hydrationCallbacks: null | SuspenseHydrationCallbacks,
+  isStrictMode: boolean,
+  concurrentUpdatesByDefaultOverride: null | boolean,
+  identifierPrefix: string,
+  onUncaughtError: (error: mixed) => void,
+  onCaughtError: (
+    error: mixed,
+    errorInfo: { +componentStack?: ?string },
+  ) => void,
+  onRecoverableError: (error: mixed) => void,
+  transitionCallbacks: null | TransitionTracingCallbacks,
 ): OpaqueRoot {
-  // 创建fiberRoot对象
-  return createFiberRoot(containerInfo, tag, hydrate, hydrationCallbacks); // 注意RootTag的传递
+  const hydrate = false;
+  const initialChildren = null;
+  return createFiberRoot(
+    containerInfo,
+    tag,
+    hydrate,
+    initialChildren,
+    hydrationCallbacks,
+    isStrictMode,
+    concurrentUpdatesByDefaultOverride,
+    identifierPrefix,
+    onUncaughtError,
+    onCaughtError,
+    onRecoverableError,
+    transitionCallbacks,
+  );
 }
 ```
 
 ### 创建 HostRootFiber 对象
 
-在`createFiberRoot`中, 创建了`react`应用的首个`fiber`对象, 称为`HostRootFiber(fiber.tag = HostRoot)`
+在`createFiberRoot`中, 创建了`react`应用的首个`fiber`对象, 称为`HostRootFiber(fiber.tag = HostRoot)`:
 
 ```js
 export function createFiberRoot(
   containerInfo: any,
   tag: RootTag,
   hydrate: boolean,
+  initialChildren: ReactNodeList,
   hydrationCallbacks: null | SuspenseHydrationCallbacks,
+  isStrictMode: boolean,
+  concurrentUpdatesByDefaultOverride: null | boolean,
+  identifierPrefix: string,
+  // ... 省略错误回调入参
 ): FiberRoot {
-  // 创建fiberRoot对象, 注意RootTag的传递
-  const root: FiberRoot = (new FiberRootNode(containerInfo, tag, hydrate): any);
+  // 创建 fiberRoot 对象 (FiberRootNode 实例)
+  const root: FiberRoot = (new FiberRootNode(
+    containerInfo,
+    tag,
+    hydrate,
+    identifierPrefix /* ... */,
+  ): any);
 
-  // 1. 这里创建了`react`应用的首个`fiber`对象, 称为`HostRootFiber`
-  const uninitializedFiber = createHostRootFiber(tag);
+  // 1. 创建 HostRootFiber (react 应用首个 fiber 对象)
+  const uninitializedFiber = createHostRootFiber(
+    tag,
+    isStrictMode,
+    concurrentUpdatesByDefaultOverride,
+  );
   root.current = uninitializedFiber;
   uninitializedFiber.stateNode = root;
-  // 2. 初始化HostRootFiber的updateQueue
+
+  // 2. 初始化 HostRoot 的内存状态 (含 hydration cache)
+  const initialState = {
+    element: initialChildren,
+    isDehydrated: hydrate,
+    cache: createCache(), // v18 新增: 用于 use(promise) 的资源缓存
+  };
+  uninitializedFiber.memoizedState = initialState;
+
+  // 3. 初始化 HostRoot 的 updateQueue
   initializeUpdateQueue(uninitializedFiber);
 
   return root;
 }
 ```
 
-在创建`HostRootFiber`时, 其中`fiber.mode`属性, 会与 3 种`RootTag`(`ConcurrentRoot`,`BlockingRoot`,`LegacyRoot`)关联起来.
+在创建`HostRootFiber`时, 其`fiber.mode`属性会与`RootTag`关联起来. v19 中只剩 2 种 RootTag(`LegacyRoot` 内部保留, `ConcurrentRoot` 业务唯一入口):
 
 ```js
-export function createHostRootFiber(tag: RootTag): Fiber {
+export function createHostRootFiber(
+  tag: RootTag,
+  isStrictMode: boolean,
+  concurrentUpdatesByDefaultOverride: null | boolean,
+): Fiber {
   let mode;
   if (tag === ConcurrentRoot) {
-    mode = ConcurrentMode | BlockingMode | StrictMode;
-  } else if (tag === BlockingRoot) {
-    mode = BlockingMode | StrictMode;
+    mode = ConcurrentMode;
+    if (isStrictMode === true || createRootStrictEffectsByDefault) {
+      mode |= StrictLegacyMode | StrictEffectsMode;
+    }
   } else {
     mode = NoMode;
   }
-  return createFiber(HostRoot, null, null, mode); // 注意这里设置的mode属性是由RootTag决定的
+  return createFiber(HostRoot, null, null, mode);
 }
 ```
 
-注意:`fiber`树中所有节点的`mode`都会和`HostRootFiber.mode`一致(新建的 fiber 节点, 其 mode 来源于父节点),所以**HostRootFiber.mode**非常重要, 它决定了以后整个 fiber 树构建过程.
+注意:
+
+- `fiber`树中所有节点的`mode`都会和`HostRootFiber.mode`一致(新建的 fiber 节点, 其 mode 来源于父节点), 所以**`HostRootFiber.mode`非常重要**, 它决定了以后整个 fiber 树构建过程.
+- v17 时代的`BlockingMode`已被删除. v19 中常见的 mode 位有: `ConcurrentMode`、`StrictLegacyMode`、`StrictEffectsMode`、`NoStrictPassiveEffectsMode`、`SuspenseyImagesMode`(详见[`ReactTypeOfMode.js`](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactTypeOfMode.js)).
 
 运行到这里, 3 个对象创建成功, `react`应用的初始化完毕.
 
 将此刻内存中各个对象的引用情况表示出来:
 
-1. legacy
-
-![](../../snapshots/bootstrap/process-legacy.png)
-
-2. concurrent
-
 ![](../../snapshots/bootstrap/process-concurrent.png)
 
-3. blocking
-
-![](../../snapshots/bootstrap/process-blocking.png)
+> 注: 该图是 v17 时期 concurrent 启动方式下的快照; v19 中无论用 `createRoot` 还是 `hydrateRoot`, 内存引用关系都与此图一致(HostRootFiber.mode 默认为 ConcurrentMode), legacy/blocking 两张图(`process-legacy.png` / `process-blocking.png`) 已不再适用, 图待重绘.
 
 注意:
 
-1. 3 种模式下,`HostRootFiber.mode`是不一致的
-2. legacy 下, `div#root`和`ReactDOMBlockingRoot`之间通过`_reactRootContainer`关联. 其他模式是没有关联的
-3. 此时`reactElement(<App/>)`还是独立在外的, 还没有和目前创建的 3 个全局对象关联起来
+1. `HostRootFiber.mode = ConcurrentMode`(开启 StrictMode 时还会附加`StrictLegacyMode | StrictEffectsMode`).
+2. v19 中, `container` DOM 与`HostRootFiber`之间通过`fiberRoot.containerInfo`/`internalContainerInstanceKey`双向关联(`markContainerAsRoot`完成的事).
+3. 此时`reactElement(<App/>)`还是独立在外的, 还没有和目前创建的 3 个全局对象关联起来.
 
 ## 调用更新入口
 
-1. legacy
-   回到`legacyRenderSubtreeIntoContainer`函数中有:
+v19 中`createRoot` / `hydrateRoot` 都通过实例的`render`方法触发首次更新:
 
 ```js
-// 2. 更新容器
-unbatchedUpdates(() => {
-  updateContainer(children, fiberRoot, parentComponent, callback);
-});
+ReactDOMRoot.prototype.render = function (children: ReactNodeList): void {
+  const root = this._internalRoot;
+  // 串联 react-dom 与 react-reconciler 的入口
+  updateContainer(children, root, null, null);
+};
 ```
 
-2. concurrent 和 blocking
-   在`ReactDOM(Blocking)Root`原型上有`render`方法
+> 与 v17 的关键差异:
+>
+> - v17 中`legacy`模式会在`unbatchedUpdates`下变更`executionContext = LegacyUnbatchedContext`再调用`updateContainer`. v18 起这条分支被删除, 所有更新都走统一路径, 由`ensureRootIsScheduled`在 microtask 中决定同步/并发.
+> - v18 起整个 react 应用都默认运行在 Concurrent 渲染器下, 但**只有使用了`useTransition` / `startTransition` / `useDeferredValue`等并发特性, 才会真正分片渲染**; 默认更新(`setState`、`dispatch`)依然以同步车道(`SyncLane / DefaultLane`)冲刷.
 
-```js
-ReactDOMRoot.prototype.render = ReactDOMBlockingRoot.prototype.render =
-  function (children: ReactNodeList): void {
-    const root = this._internalRoot;
-    // 执行更新
-    updateContainer(children, root, null, null);
-  };
-```
-
-相同点:
-
-1. 3 种模式在调用更新时都会执行`updateContainer`. `updateContainer`函数串联了`react-dom`与`react-reconciler`, 之后的逻辑进入了`react-reconciler`包.
-
-不同点:
-
-1. `legacy`下的更新会先调用`unbatchedUpdates`, 更改执行上下文为`LegacyUnbatchedContext`, 之后调用`updateContainer`进行更新.
-
-2. `concurrent`和`blocking`不会更改执行上下文, 直接调用`updateContainer`进行更新.
-
-继续跟踪[`updateContainer`函数](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberReconciler.old.js#L250-L321)
+继续跟踪[`updateContainer`函数](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberReconciler.js):
 
 ```js
 export function updateContainer(
@@ -373,43 +288,59 @@ export function updateContainer(
   callback: ?Function,
 ): Lane {
   const current = container.current;
-  // 1. 获取当前时间戳, 计算本次更新的优先级
-  const eventTime = requestEventTime();
+  // 1. 选取本次更新的 lane (v19 不再用 eventTime + requestUpdateLane 双参数)
   const lane = requestUpdateLane(current);
 
-  // 2. 设置fiber.updateQueue
-  const update = createUpdate(eventTime, lane);
+  // 2. 创建 update, 把要渲染的 element 放到 payload 上
+  const update = createUpdate(lane);
   update.payload = { element };
   callback = callback === undefined ? null : callback;
   if (callback !== null) {
     update.callback = callback;
   }
-  enqueueUpdate(current, update);
 
-  // 3. 进入reconciler运作流程中的`输入`环节
-  scheduleUpdateOnFiber(current, lane, eventTime);
+  // 3. 将 update 加入 HostRootFiber 的 updateQueue
+  const root = enqueueUpdate(current, update, lane);
+  if (root !== null) {
+    // 4. 进入 reconciler 运作流程中的 `输入` 环节
+    scheduleUpdateOnFiber(root, current, lane);
+    entangleTransitions(root, current, lane);
+  }
   return lane;
 }
 ```
 
-`updateContainer`函数位于`react-reconciler`包中, 它串联了`react-dom`与`react-reconciler`. 此处暂时不深入分析`updateContainer`函数的具体功能, 需要关注其最后调用了`scheduleUpdateOnFiber`.
+`updateContainer`函数位于`react-reconciler`包中, 它串联了`react-dom`与`react-reconciler`. 它最后调用了`scheduleUpdateOnFiber(root, fiber, lane)`.
 
 在前文[`reconciler 运作流程`](./reconciler-workflow.md)中, 重点分析过`scheduleUpdateOnFiber`是`输入`阶段的入口函数.
 
-所以到此为止, 通过调用`react-dom`包的`api`(如: `ReactDOM.render`), `react`内部经过一系列运转, 完成了初始化, 并且进入了`reconciler 运作流程`的第一个阶段.
+所以到此为止, 通过调用`react-dom/client`包的`api`(如: `createRoot(...).render(<App/>)`), `react`内部经过一系列运转, 完成了初始化, 并且进入了`reconciler 运作流程`的第一个阶段.
 
 ## 思考
 
 ### 可中断渲染
 
-react 中最广为人知的可中断渲染(render 可以中断, 部分生命周期函数有可能执行多次, `UNSAFE_componentWillMount`,`UNSAFE_componentWillReceiveProps`)只有在`HostRootFiber.mode === ConcurrentRoot | BlockingRoot`才会开启. 如果使用的是`legacy`, 即通过`ReactDOM.render(<App/>, dom)`这种方式启动时`HostRootFiber.mode = NoMode`, 这种情况下无论是首次 render 还是后续 update 都只会进入同步工作循环, `reconciliation`没有机会中断, 所以生命周期函数只会调用一次.
+react 中最广为人知的可中断渲染(render 可以中断, 部分生命周期函数有可能执行多次, `UNSAFE_componentWillMount`、`UNSAFE_componentWillReceiveProps`)只有在`HostRootFiber.mode & ConcurrentMode`时才会开启. 在 v19 中, 通过`createRoot`启动的应用默认就满足这个条件.
 
-对于`可中断渲染`的宣传最早来自[2017 年 Lin Clark 的演讲](http://conf2017.reactjs.org/speakers/lin). 演讲中阐述了未来 react 会应用 fiber 架构, `reconciliation可中断`等(13:15 秒). 在[`v16.1.0`](https://github.com/facebook/react/blob/master/CHANGELOG.md#1610-november-9-2017)中应用了 fiber.
+但 "默认运行在 Concurrent 渲染器下" 不等于 "每一次更新都会被时间切片". 实际行为是这样的:
 
-在最新稳定版[`v17.0.2`](https://github.com/facebook/react/blob/main/CHANGELOG.md#1702-march-22-2021)中, `可中断渲染`虽然实现, 但是并没有在稳定版暴露出 api. 只能[安装 alpha 版本](https://github.com/reactwg/react-18/discussions/9)才能体验该特性.
+- **默认更新(SyncLane / DefaultLane)**: 由`microtask`冲刷, 整个 render 阶段不会让出主线程, 表现与 v17 sync 更新一致.
+- **过渡更新(`useTransition` / `startTransition`)**: 落到`TransitionLane`, 走`renderRootConcurrent` → `workLoopConcurrent`, 每个`performUnitOfWork`完成后通过`shouldYield()`检查时间切片, 真正发生可中断渲染.
+- **延迟更新(`useDeferredValue`)**: 落到`DeferredLane`, 同样可被中断.
 
-但是不少开发人员认为稳定版本的`react`已经是可中断渲染(其实是有误区的), 大概率也是受到了各类宣传文章的影响. 前端大环境还是比较浮躁的, 在当下, 更需要静下心来学习.
+对于`可中断渲染`的宣传最早来自[2017 年 Lin Clark 的演讲](https://conf2017.reactjs.org/speakers/lin), 直到[`v18.0.0`](https://github.com/facebook/react/blob/main/CHANGELOG.md#1800-march-29-2022)才真正落地到生产稳定版. 在`v19.2.6`中, Concurrent 已经是默认渲染器, 但**是否分片渲染**仍取决于是否使用了上述并发 API.
+
+### 与 v17 启动流程的差异总结
+
+| 维度            | v17.0.2                                                                      | v19.2.6                                          |
+| --------------- | ---------------------------------------------------------------------------- | ------------------------------------------------ | ------------------------- | ----------- | ---------------------------------------- | ------------------------------------------ |
+| 入口 API        | `ReactDOM.render` / `ReactDOM.hydrate` / `createBlockingRoot` / `createRoot` | `createRoot` / `hydrateRoot`(`react-dom/client`) |
+| RootTag         | `LegacyRoot` / `BlockingRoot` / `ConcurrentRoot`                             | `ConcurrentRoot`(`LegacyRoot`仅内部桥接)         |
+| Mode 位         | `NoMode` / `ConcurrentMode                                                   | BlockingMode                                     | StrictMode`/`BlockingMode | StrictMode` | `ConcurrentMode`(可叠加`StrictLegacyMode | StrictEffectsMode`, `BlockingMode` 已删除) |
+| 调度入口        | 同步绕过调度 / 经 Scheduler                                                  | 全部走`ensureRootIsScheduled` → microtask 决策   |
+| render callback | `ReactDOM.render(..., callback)`支持                                         | `root.render(...)`不再支持 callback              |
+| 事件代理节点    | rootContainer (v17 已迁移)                                                   | rootContainer (一致)                             |
 
 ## 总结
 
-本章节介绍了`react`应用的 3 种启动方式. 分析了启动后创建了 3 个关键对象, 并绘制了对象在内存中的引用关系. 启动过程最后调用`updateContainer`进入`react-reconciler`包,进而调用`schedulerUpdateOnFiber`函数, 与`reconciler运作流程`中的`输入`阶段相衔接.
+本章节介绍了`react`应用的 2 种启动方式(`createRoot` / `hydrateRoot`). 分析了启动后创建的 3 个关键对象, 并简单梳理了对象在内存中的引用关系. 启动过程最后调用`updateContainer`进入`react-reconciler`包, 进而调用`scheduleUpdateOnFiber`函数, 与`reconciler 运作流程`中的`输入`阶段相衔接.

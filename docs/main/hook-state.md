@@ -8,7 +8,7 @@ order: 2
 
 首先回顾一下前文[Hook 原理(概览)](./hook-summary.md), 其主要内容有:
 
-1. `function`类型的`fiber`节点, 它的处理函数是[updateFunctionComponent](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberBeginWork.old.js#L702-L783), 其中再通过[renderWithHooks](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L342-L476)调用`function`.
+1. `function`类型的`fiber`节点, 它的处理函数是[updateFunctionComponent](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberBeginWork.js), 其中再通过[renderWithHooks](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)调用`function`.
 2. 在`function`中, 通过`Hook Api`(如: `useState, useEffect`)创建`Hook`对象.
    - `状态Hook`实现了状态持久化(等同于`class组件`维护`fiber.memoizedState`).
    - `副作用Hook`则实现了维护`fiber.flags`,并提供`副作用回调`(类似于`class组件`的生命周期回调)
@@ -19,40 +19,47 @@ order: 2
 
 ## 创建 Hook
 
-在`fiber`初次构造阶段, [useState](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1787)对应源码[mountState](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1113-L1136), [useReducer](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1785)对应源码[mountReducer](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L624-L649)
+在`fiber`初次构造阶段, [useState](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)对应源码[mountState](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js), [useReducer](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)对应源码[mountReducer](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)
 
-`mountState`:
+> v18 起: `dispatchAction`被拆分为 2 个函数, `useState`的 dispatcher 是`dispatchSetState`, `useReducer`的 dispatcher 是`dispatchReducerAction`. 这样做的原因是: `useState`内部知道 reducer 就是`basicStateReducer`, 可以提前做`eagerState`优化; 而`useReducer`使用外部 reducer, 走完整路径.
+
+`mountState` (v19):
 
 ```js
 function mountState<S>(
   initialState: (() => S) | S,
 ): [S, Dispatch<BasicStateAction<S>>] {
   // 1. 创建hook
+  const hook = mountStateImpl(initialState);
+  // 2. queue 已在 mountStateImpl 中初始化, 取出
+  const queue = hook.queue;
+  // 3. 设置 hook.dispatch (v18 起改用 dispatchSetState)
+  const dispatch: Dispatch<BasicStateAction<S>> = (dispatchSetState.bind(
+    null,
+    currentlyRenderingFiber,
+    queue,
+  ): any);
+  queue.dispatch = dispatch;
+  // 4. 返回[当前状态, dispatch函数]
+  return [hook.memoizedState, dispatch];
+}
+
+function mountStateImpl<S>(initialState: (() => S) | S): Hook {
   const hook = mountWorkInProgressHook();
-  if (typeof initialState === 'function') {
-    initialState = initialState();
-  }
-  // 2. 初始化hook的属性
-  // 2.1 设置 hook.memoizedState/hook.baseState
-  // 2.2 设置 hook.queue
+  if (typeof initialState === 'function') initialState = initialState();
   hook.memoizedState = hook.baseState = initialState;
-  const queue = (hook.queue = {
+  hook.queue = {
     pending: null,
+    lanes: NoLanes,
     dispatch: null,
-    // queue.lastRenderedReducer是内置函数
     lastRenderedReducer: basicStateReducer,
     lastRenderedState: (initialState: any),
-  });
-  // 2.3 设置 hook.dispatch
-  const dispatch: Dispatch<BasicStateAction<S>> = (queue.dispatch =
-    (dispatchAction.bind(null, currentlyRenderingFiber, queue): any));
-
-  // 3. 返回[当前状态, dispatch函数]
-  return [hook.memoizedState, dispatch];
+  };
+  return hook;
 }
 ```
 
-`mountReducer`:
+`mountReducer` (v19):
 
 ```js
 function mountReducer<S, I, A>(
@@ -69,41 +76,45 @@ function mountReducer<S, I, A>(
     initialState = ((initialArg: any): S);
   }
   // 2. 初始化hook的属性
-  // 2.1 设置 hook.memoizedState/hook.baseState
   hook.memoizedState = hook.baseState = initialState;
-  // 2.2 设置 hook.queue
-  const queue = (hook.queue = {
+  const queue: UpdateQueue<S, A> = {
     pending: null,
+    lanes: NoLanes,
     dispatch: null,
-    // queue.lastRenderedReducer是由外传入
     lastRenderedReducer: reducer,
     lastRenderedState: (initialState: any),
-  });
-  // 2.3 设置 hook.dispatch
-  const dispatch: Dispatch<A> = (queue.dispatch = (dispatchAction.bind(
+  };
+  hook.queue = queue;
+  // 3. 设置 hook.dispatch (v18 起改用 dispatchReducerAction)
+  const dispatch: Dispatch<A> = (queue.dispatch = (dispatchReducerAction.bind(
     null,
     currentlyRenderingFiber,
     queue,
   ): any));
-
-  // 3. 返回[当前状态, dispatch函数]
+  // 4. 返回[当前状态, dispatch函数]
   return [hook.memoizedState, dispatch];
 }
 ```
 
 `mountState`和`mountReducer`逻辑简单: 主要负责创建`hook`, 初始化`hook`的属性, 最后返回`[当前状态, dispatch函数]`.
 
-唯一的不同点是`hook.queue.lastRenderedReducer`:
+主要不同点有两个:
 
-- `mountState`使用的是内置的[basicStateReducer](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L619-L622)
+1. **`hook.queue.lastRenderedReducer`**:
 
-  ```js
-  function basicStateReducer<S>(state: S, action: BasicStateAction<S>): S {
-    return typeof action === 'function' ? action(state) : action;
-  }
-  ```
+   - `mountState`使用的是内置的[basicStateReducer](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)
 
-- `mountReducer`使用的是外部传入自定义`reducer`
+     ```js
+     function basicStateReducer<S>(state: S, action: BasicStateAction<S>): S {
+       return typeof action === 'function' ? action(state) : action;
+     }
+     ```
+
+   - `mountReducer`使用的是外部传入自定义`reducer`.
+
+2. **dispatch 函数(v18 起拆分)**:
+   - `useState`绑定`dispatchSetState`: 内部已知 reducer 是`basicStateReducer`, 可立即 try-eager-bailout.
+   - `useReducer`绑定`dispatchReducerAction`: 走完整调度路径, 不做 eager.
 
 可见`mountState`是`mountReducer`的一种特殊情况, 即`useState`也是`useReducer`的一种特殊情况, 也是最简单的情况.
 
@@ -183,66 +194,86 @@ export default function App() {
 
 ![](../../snapshots/hook-state/initial-state.png)
 
-点击`button`, 通过`dispatch`函数进行更新, `dispatch`实际就是[dispatchAction](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1645-L1753):
+点击`button`, 通过`dispatch`函数进行更新, `dispatch`实际就是[dispatchSetState](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)(v18 起替代了原来的`dispatchAction`):
 
 ```js
-function dispatchAction<S, A>(
+// v19 简化版
+function dispatchSetState<S, A>(
   fiber: Fiber,
   queue: UpdateQueue<S, A>,
   action: A,
 ) {
-  // 1. 创建update对象
-  const eventTime = requestEventTime();
-  const lane = requestUpdateLane(fiber); // Legacy模式返回SyncLane
+  // 1. 计算优先级 (v18 起不再传 eventTime, 由 ReactFiberRootScheduler 在微任务中统一打时间戳)
+  const lane = requestUpdateLane(fiber);
+
+  // 2. 创建 update 对象 (v18+ 字段)
   const update: Update<S, A> = {
     lane,
+    revertLane: NoLane, // 配合 Transition 回滚使用
     action,
-    eagerReducer: null,
+    hasEagerState: false, // v18 起替代 eagerReducer 标志
     eagerState: null,
     next: (null: any),
   };
 
-  // 2. 将update对象添加到hook.queue.pending队列
-  const pending = queue.pending;
-  if (pending === null) {
-    // 首个update, 创建一个环形链表
-    update.next = update;
+  if (isRenderPhaseUpdate(fiber)) {
+    // 渲染期更新: 做全局标记, 走 enqueueRenderPhaseUpdate
+    enqueueRenderPhaseUpdate(queue, update);
   } else {
-    update.next = pending.next;
-    pending.next = update;
-  }
-  queue.pending = update;
-
-  const alternate = fiber.alternate;
-  if (
-    fiber === currentlyRenderingFiber ||
-    (alternate !== null && alternate === currentlyRenderingFiber)
-  ) {
-    // 渲染时更新, 做好全局标记
-    didScheduleRenderPhaseUpdateDuringThisPass =
-      didScheduleRenderPhaseUpdate = true;
-  } else {
-    // ...省略性能优化部分, 下文介绍
-
-    // 3. 发起调度更新, 进入`reconciler 运作流程`中的输入阶段.
-    scheduleUpdateOnFiber(fiber, lane, eventTime);
+    const alternate = fiber.alternate;
+    if (
+      fiber.lanes === NoLanes &&
+      (alternate === null || alternate.lanes === NoLanes)
+    ) {
+      // 性能优化: eager state (见下文)
+      const lastRenderedReducer = queue.lastRenderedReducer;
+      if (lastRenderedReducer !== null) {
+        try {
+          const currentState: S = (queue.lastRenderedState: any);
+          const eagerState = lastRenderedReducer(currentState, action);
+          update.hasEagerState = true;
+          update.eagerState = eagerState;
+          if (is(eagerState, currentState)) {
+            // 快通道: 将 update 入队但不调度
+            enqueueConcurrentHookUpdateAndEagerlyBailout(fiber, queue, update);
+            return;
+          }
+        } catch (error) {
+          // 渲染期会重新抛
+        }
+      }
+    }
+    // 3. 入队 (v18 起统一的 enqueueConcurrentHookUpdate)
+    const root = enqueueConcurrentHookUpdate(fiber, queue, update, lane);
+    if (root !== null) {
+      // 4. 发起调度
+      scheduleUpdateOnFiber(root, fiber, lane);
+      entangleTransitionUpdate(root, queue, lane); // 配合 useTransition
+    }
   }
 }
 ```
 
 逻辑十分清晰:
 
-1. 创建`update`对象, 其中`update.lane`代表优先级(可回顾[fiber 树构造(基础准备)](./fibertree-prepare.md#update-lane)中的`update优先级`).
-2. 将`update`对象添加到`hook.queue.pending`环形链表.
-   - `环形链表`的特征: 为了方便添加新元素和快速拿到队首元素(都是`O(1)`), 所以`pending`指针指向了链表中最后一个元素.
-   - 链表的使用方式可以参考[React 算法之链表操作](../algorithm/linkedlist.md)
-3. 发起调度更新: 调用`scheduleUpdateOnFiber`, 进入`reconciler 运作流程`中的输入阶段.
+1. 计算`lane`(`requestUpdateLane`内部会处理`Transition`、`Discrete event`、`Continuous event`等场景, 详见[priority.md](./priority.md)).
+2. 创建`update`对象. v18+ 的`update`不再有`eventTime`字段(时间统一在`processRootScheduleInMicrotask`中标记), 并将`eagerReducer`替换为`hasEagerState` boolean.
+3. 通过`enqueueConcurrentHookUpdate`把`update`加入`concurrentQueues`待提交队列, 同时返回`root`. 该函数会让`hook.queue.pending`的修改延迟到下一次进入 render 之前生效, 避免渲染中修改造成可见性问题.
+4. 调用`scheduleUpdateOnFiber(root, fiber, lane)`, 进入`reconciler 运作流程`中的输入阶段.
+5. `entangleTransitionUpdate`: 如果当前队列上正在处理一个`Transition lane`, 把新 update 也纠缠进同一批, 保证 transition 内部所有`setState`原子提交.
+
+> 与 v17 的差异:
+>
+> - 参数: `(fiber, queue, action)`, 不再传`eventTime`.
+> - 入队方式: 不再直接修改`queue.pending`, 改为先放入全局`concurrentQueues`, 在`finishQueueingConcurrentUpdates`时统一提交.
+> - 调度: 调用`scheduleUpdateOnFiber(root, fiber, lane)`, 第一个参数是`root`(便于`ReactFiberRootScheduler`管理多 root).
+> - `useReducer`走的是几乎相同的`dispatchReducerAction`, 区别仅在于不做 eager 优化.
 
 从调用`scheduleUpdateOnFiber`开始, 进入了`react-reconciler`包, 其中的所有逻辑可回顾[reconciler 运作流程](./reconciler-workflow.md), 本节只讨论`状态Hook`相关逻辑.
 
-注意: 本示例中虽然同时执行了 3 次 dispatch, 会请求 3 次调度, 由于调度中心的[节流优化](./scheduler.md##throttle-debounce), 最后只会执行一次渲染
+注意: 本示例中虽然同时执行了 3 次 dispatch, 会请求 3 次调度. v18 起所有更新天然走 microtask 自动批处理(`automatic batching`), 最后只会执行一次渲染. 详见[scheduler.md 节流防抖](./scheduler.md#throttle-debounce)和[fibertree-prepare.md 自动批处理](./fibertree-prepare.md).
 
-在`fiber树构造(对比更新)`过程中, 再次调用`function`, 这时[useState](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1808)对应的函数是[updateState](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1138-L1142)
+在`fiber树构造(对比更新)`过程中, 再次调用`function`, 这时`useState`对应的函数是[updateState](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)
 
 ```js
 function updateState<S>(
@@ -252,13 +283,14 @@ function updateState<S>(
 }
 ```
 
-实际调用[updateReducer](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L651-L783).
+实际调用[updateReducer](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js).
 
 在执行`updateReducer`之前, `hook`相关的内存结构如下:
 
 ![](../../snapshots/hook-state/before-basequeue-combine.png)
 
 ```js
+// v19 简化版
 function updateReducer<S, I, A>(
   reducer: (S, A) => S,
   initialArg: I,
@@ -266,12 +298,19 @@ function updateReducer<S, I, A>(
 ): [S, Dispatch<A>] {
   // 1. 获取workInProgressHook对象
   const hook = updateWorkInProgressHook();
+  return updateReducerImpl(hook, ((currentHook: any): Hook), reducer);
+}
+
+function updateReducerImpl<S, A>(
+  hook: Hook,
+  current: Hook,
+  reducer: (S, A) => S,
+): [S, Dispatch<A>] {
   const queue = hook.queue;
   queue.lastRenderedReducer = reducer;
-  const current: Hook = (currentHook: any);
-  let baseQueue = current.baseQueue;
 
   // 2. 链表拼接: 将 hook.queue.pending 拼接到 current.baseQueue
+  let baseQueue = hook.baseQueue;
   const pendingQueue = queue.pending;
   if (pendingQueue !== null) {
     if (baseQueue !== null) {
@@ -283,25 +322,35 @@ function updateReducer<S, I, A>(
     current.baseQueue = baseQueue = pendingQueue;
     queue.pending = null;
   }
-  // 3. 状态计算
-  if (baseQueue !== null) {
-    const first = baseQueue.next;
-    let newState = current.baseState;
 
+  // 3. 状态计算
+  const baseState = hook.baseState;
+  if (baseQueue === null) {
+    hook.memoizedState = baseState;
+  } else {
+    const first = baseQueue.next;
+    let newState = baseState;
     let newBaseState = null;
     let newBaseQueueFirst = null;
     let newBaseQueueLast = null;
     let update = first;
+    let didReadFromEntangledAsyncAction = false;
 
     do {
-      const updateLane = update.lane;
-      // 3.1 优先级提取update
-      if (!isSubsetOfLanes(renderLanes, updateLane)) {
-        // 优先级不够: 加入到baseQueue中, 等待下一次render
+      const updateLane = removeLanes(update.lane, OffscreenLane);
+      const isHiddenUpdate = updateLane !== update.lane;
+
+      const shouldSkipUpdate = isHiddenUpdate
+        ? !isSubsetOfLanes(getWorkInProgressRootRenderLanes(), updateLane)
+        : !isSubsetOfLanes(renderLanes, updateLane);
+
+      if (shouldSkipUpdate) {
+        // 优先级不够: 加入到 baseQueue 中, 等待下一次 render
         const clone: Update<S, A> = {
           lane: updateLane,
+          revertLane: update.revertLane,
           action: update.action,
-          eagerReducer: update.eagerReducer,
+          hasEagerState: update.hasEagerState,
           eagerState: update.eagerState,
           next: (null: any),
         };
@@ -317,25 +366,29 @@ function updateReducer<S, I, A>(
         );
         markSkippedUpdateLanes(updateLane);
       } else {
-        // 优先级足够: 状态合并
+        // v18+ Transition 回退处理 (useOptimistic / useTransition)
+        const revertLane = update.revertLane;
+        if (revertLane !== NoLane) {
+          // ... 详见源码中的 transition entangle 逻辑
+        }
+
         if (newBaseQueueLast !== null) {
-          // 更新baseQueue
           const clone: Update<S, A> = {
             lane: NoLane,
+            revertLane: NoLane,
             action: update.action,
-            eagerReducer: update.eagerReducer,
+            hasEagerState: update.hasEagerState,
             eagerState: update.eagerState,
             next: (null: any),
           };
           newBaseQueueLast = newBaseQueueLast.next = clone;
         }
-        if (update.eagerReducer === reducer) {
-          // 性能优化: 如果存在 update.eagerReducer, 直接使用update.eagerState.避免重复调用reducer
+
+        // 计算 newState (复用 eagerState 优化)
+        if (update.hasEagerState) {
           newState = ((update.eagerState: any): S);
         } else {
-          const action = update.action;
-          // 调用reducer获取最新状态
-          newState = reducer(newState, action);
+          newState = reducer(newState, update.action);
         }
       }
       update = update.next;
@@ -350,7 +403,6 @@ function updateReducer<S, I, A>(
     if (!is(newState, hook.memoizedState)) {
       markWorkInProgressReceivedUpdate();
     }
-    // 把计算之后的结果更新到workInProgressHook上
     hook.memoizedState = newState;
     hook.baseState = newBaseState;
     hook.baseQueue = newBaseQueueLast;
@@ -379,55 +431,50 @@ function updateReducer<S, I, A>(
 
 ### 性能优化
 
-`dispatchAction`函数中, 在调用`scheduleUpdateOnFiber`之前, 针对`update`对象做了性能优化.
+`dispatchSetState`函数中, 在调用`scheduleUpdateOnFiber`之前, 针对`update`对象做了性能优化(`useReducer`走的`dispatchReducerAction`**不做**此优化).
 
-1. `queue.pending`中只包含当前`update`时, 即当前`update`是`queue.pending`中的第一个`update`
-2. 直接调用`queue.lastRenderedReducer`,计算出`update`之后的 state, 记为`eagerState`
-3. 如果`eagerState`与`currentState`相同, 则直接退出, 不用发起调度更新.
-4. 已经被挂载到`queue.pending`上的`update`会在下一次`render`时再次合并.
+1. `fiber.lanes === NoLanes`时(意味着该 fiber 没有其他 pending update), 当前`update`就是`queue.pending`中的第一个`update`.
+2. 直接调用`queue.lastRenderedReducer`计算出`update`之后的 state, 记为`eagerState`.
+3. 如果`eagerState`与`currentState`相同(`Object.is`), 则**入队但不调度**, 直接返回. 之后如果有其他更新需要 render, 该 update 仍会参与状态计算, 不会丢失.
+4. 否则, 标记`update.hasEagerState = true`, 在 render 阶段直接使用`eagerState`避免再次调用 reducer.
 
 ```js
-function dispatchAction<S, A>(
-  fiber: Fiber,
-  queue: UpdateQueue<S, A>,
-  action: A,
+// dispatchSetState 性能优化部分 (v19)
+if (
+  fiber.lanes === NoLanes &&
+  (alternate === null || alternate.lanes === NoLanes)
 ) {
-  // ...省略无关代码 ...只保留性能优化部分代码:
-
-  // 下面这个if判断, 能保证当前创建的update, 是`queue.pending`中第一个`update`. 为什么? 发起更新之后fiber.lanes会被改动(可以回顾`fiber 树构造(对比更新)`章节), 如果`fiber.lanes && alternate.lanes`没有被改动, 自然就是首个update
-  if (
-    fiber.lanes === NoLanes &&
-    (alternate === null || alternate.lanes === NoLanes)
-  ) {
-    const lastRenderedReducer = queue.lastRenderedReducer;
-    if (lastRenderedReducer !== null) {
-      let prevDispatcher;
+  const lastRenderedReducer = queue.lastRenderedReducer;
+  if (lastRenderedReducer !== null) {
+    try {
       const currentState: S = (queue.lastRenderedState: any);
       const eagerState = lastRenderedReducer(currentState, action);
-      // 暂存`eagerReducer`和`eagerState`, 如果在render阶段reducer==update.eagerReducer, 则可以直接使用无需再次计算
-      update.eagerReducer = lastRenderedReducer;
+      // v18 起标志位字段变更: eagerReducer → hasEagerState (boolean)
+      update.hasEagerState = true;
       update.eagerState = eagerState;
       if (is(eagerState, currentState)) {
-        // 快速通道, eagerState与currentState相同, 无需调度更新
-        // 注: update已经被添加到了queue.pending, 并没有丢弃. 之后需要更新的时候, 此update还是会起作用
+        // 快速通道, 入队但不调度
+        enqueueConcurrentHookUpdateAndEagerlyBailout(fiber, queue, update);
         return;
       }
+    } catch (error) {
+      // 此处忽略, 错误在 render 时还会再次抛出
     }
   }
-  // 发起调度更新, 进入`reconciler 运作流程`中的输入阶段.
-  scheduleUpdateOnFiber(fiber, lane, eventTime);
 }
 ```
 
-为了验证上述优化, 可以查看这个 demo:[![Edit hook-throttle](https://codesandbox.io/static/img/play-codesandbox.svg)](https://codesandbox.io/s/hook-throttle-58ly5?fontsize=14&hidenavigation=1&theme=dark)
+为了验证上述优化, 可以查看这个 demo: [![Edit hook-throttle](https://codesandbox.io/static/img/play-codesandbox.svg)](https://codesandbox.io/s/hook-throttle-58ly5?fontsize=14&hidenavigation=1&theme=dark)
 
-### 异步更新
+### 异步更新与 Concurrent 模式
 
-上述示例都是为在`Legacy`模式下, 所以均为同步更新. 所以`update`对象会被全量合并,`hook.baseQueue`和`hook.baseState`并没有起到实质作用.
+> v17 时期默认是`Legacy`模式, 同步更新, 所以`update`对象会被全量合并, `hook.baseQueue`和`hook.baseState`并没有起到实质作用.
+>
+> v18 起所有通过`createRoot`创建的应用默认开启 `Concurrent` 模式, 但是否会"按优先级跳过 update"取决于业务代码: 只有在`useTransition / startTransition / useDeferredValue / useOptimistic / Server Component refresh`等场景中, update 才会被打上低优先级(`TransitionLane`/`DeferredLane`/`OffscreenLane`等)与高优先级 update 共存.
+>
+> 本节示意图同样适用于"高优先级 update + 低优先级 transition update"的混合场景.
 
-虽然在`v17.x`版本中, 并没有`Concurrent`模式的入口, 即将发布的`v18.x`版本将全面进入异步时代, 所以本节提前梳理一下`update`异步合并的逻辑. 同时加深`hook.baseQueue`和`hook.baseState`的理解.
-
-假设有一个`queue.pending`链表, 其中`update`优先级不同, `绿色`表示高优先级, `灰色`表示低优先级, `红色`表示最高优先级.
+假设有一个`queue.pending`链表, 其中`update`优先级不同, `绿色`表示高优先级, `灰色`表示低优先级(例如`TransitionLane`), `红色`表示最高优先级.
 
 在执行`updateReducer`之前, `hook.memoizedState`有如下结构(其中`update3, update4`是低优先级):
 
@@ -464,6 +511,28 @@ function dispatchAction<S, A>(
 
 > 结论: 尽管`update`链表的优先级不同, 中间的`render`可能有多次, 但最终的更新结果等于`update`链表`按顺序合并`.
 
+## 与其他状态类 Hook 的关系
+
+v18 起新增的`useTransition / useDeferredValue / useOptimistic / useActionState`本质都建立在`useReducer`的基础上, 区别只在`update.lane`与`update.revertLane`的取值:
+
+| Hook                    | 内部实现                                           | update.lane 特点                                                              |
+| ----------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `useState / useReducer` | `dispatchSetState / dispatchReducerAction`         | 由`requestUpdateLane`返回, 通常是同步/事件优先级                              |
+| `useTransition`         | `useReducer` + `startTransition` 包裹的 `dispatch` | dispatch 时切到`TransitionLane`(由全局`ReactSharedInternals.T`提供)           |
+| `useDeferredValue`      | `useReducer` + `getDeferredLane`                   | 上一次旧值立即生效, 新值放入`DeferredLane`懒提交                              |
+| `useOptimistic`         | `useReducer` + `setOptimistic`                     | 在 transition 内 dispatch, 同时设置`update.revertLane`, transition 完成时撤回 |
+| `useActionState`        | `useOptimistic` + `useReducer` 组合                | action 是 async 函数, dispatch 时进入 transition                              |
+
+也就是说: **`useReducer / useState`是"状态 Hook 之根"**, 上述并发能力都是在它的`update`字段上"加车道"实现的, 没有引入新的状态结构.
+
 ## 总结
 
 本节深入分析`状态Hook`即`useState`的内部原理, 从`同步,异步`更新理解了`update`对象的合并方式, 最终结果存储在`hook.memoizedState`供给`function`使用.
+
+v17 → v19 关键变化:
+
+1. **`dispatchAction`拆分**: `useState`→`dispatchSetState`(带 eager 优化), `useReducer`→`dispatchReducerAction`.
+2. **`update`字段变更**: 去掉`eventTime`, `eagerReducer`变为`hasEagerState`(boolean), 新增`revertLane`(配合 Transition / Optimistic).
+3. **`UpdateQueue`字段变更**: 新增`lanes`聚合字段, 用于`enqueueConcurrentHookUpdate`期间快速比对优先级.
+4. **入队机制**: 不再直接改`queue.pending`, 改为`enqueueConcurrentHookUpdate`先放进全局`concurrentQueues`, 由`finishQueueingConcurrentUpdates`在 render 准备阶段一次性提交, 杜绝渲染期间被外部修改.
+5. **自动批处理**: 所有 dispatch 都通过 microtask 调度, 同一 tick 内的多次 dispatch 自动合并为一次 render.

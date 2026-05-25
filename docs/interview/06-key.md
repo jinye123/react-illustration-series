@@ -17,83 +17,67 @@ order: 1
 
 在把`jsx`转换成`ReactElement对象`的语法时, 有一个兼容问题. 会根据编译器的不同策略, 编译成 2 种方案.
 
+> v19 重大变化:
+>
+> - `ReactCurrentOwner` 已被移除, 其语义合并到`ReactSharedInternals.A`(异步上下文).
+> - `ReactElement` 上的 `_owner` 字段已被移除(v19 同样删除).
+> - **`ref`是普通 prop**: 不再需要`forwardRef`, function 组件可以直接通过`props.ref`接收(v19+).
+> - `jsxDEV` 取代 dev 环境的 `jsx`, 多带一个 `source` 用于报错定位.
+
 1. 最新的转译策略: 会将`jsx`语法的代码, 转译成`jsx()`函数包裹
 
-   `jsx`函数: 只保留与`key`相关的代码(其余源码本节不讨论)
+   `jsx`函数 (v19 简化版): 只保留与`key`相关的代码
 
    ```js
    /**
     * https://github.com/reactjs/rfcs/pull/107
-    * @param {*} type
-    * @param {object} props
-    * @param {string} key
     */
-   export function jsx(type, config, maybeKey) {
-     let propName;
-
-     // 1. key的默认值是null
+   export function jsxProd(type, config, maybeKey) {
+     // 1. key的默认值是 null
      let key = null;
 
-     // Currently, key can be spread in as a prop. This causes a potential
-     // issue if key is also explicitly declared (ie. <div {...props} key="Hi" />
-     // or <div key="Hi" {...props} /> ). We want to deprecate key spread,
-     // but as an intermediary step, we will use jsxDEV for everything except
-     // <div {...props} key="Hi" />, because we aren't currently able to tell if
-     // key is explicitly declared to be undefined or not.
+     // v19 中 key 仍然作为第三个独立参数传入, 不会被 spread 到 props 中
      if (maybeKey !== undefined) {
        key = '' + maybeKey;
      }
-
      if (hasValidKey(config)) {
-       // 2. 将key转换成字符串
        key = '' + config.key;
      }
-     // 3. 将key传入构造函数
+
+     // 2. v19 中 ref 不再被特殊处理, 直接留在 props 里
      return ReactElement(
        type,
        key,
-       ref,
-       undefined,
-       undefined,
-       ReactCurrentOwner.current,
+       /* self */ undefined,
+       /* source */ undefined,
+       /* owner */ null, // v19: owner 由 ReactSharedInternals.A 在 dev 环境维护
        props,
      );
    }
    ```
 
-2. 传统的转译策略: 会将`jsx`语法的代码, 转译成[React.createElement()函数包裹](https://github.com/facebook/react/blob/v17.0.2/packages/react/src/ReactElement.js#L126-L146)
+2. 传统的转译策略: 会将`jsx`语法的代码, 转译成[React.createElement()函数包裹](https://github.com/facebook/react/blob/v19.2.6/packages/react/src/ReactElement.js)
 
-   `React.createElement()函数`: 只保留与`key`相关的代码(其余源码本节不讨论)
+   `React.createElement()函数` (v19 简化版): 只保留与`key`相关的代码
 
    ```js
-   /**
-    * Create and return a new ReactElement of the given type.
-    * See https://reactjs.org/docs/react-api.html#createelement
-    */
    export function createElement(type, config, children) {
-     let propName;
-
-     // Reserved names are extracted
      const props = {};
-
      let key = null;
-     let ref = null;
-     let self = null;
-     let source = null;
 
      if (config != null) {
        if (hasValidKey(config)) {
-         key = '' + config.key; // key转换成字符串
+         key = '' + config.key;
        }
+       // v19: 不再为 ref 做特殊处理 (ref 直接挂在 props 上)
      }
 
      return ReactElement(
        type,
        key,
-       ref,
-       self,
-       source,
-       ReactCurrentOwner.current,
+       /* self */ undefined,
+       /* source */ undefined,
+       /* owner */ null,
        props,
      );
    }
@@ -101,21 +85,20 @@ order: 1
 
 可以看到无论采取哪种编译方式, 核心逻辑都是一致的:
 
-1. `key`的默认值是`null`
+1. `key`的默认值是`null`.
 2. 如果外界有显式指定的`key`, 则将`key`转换成字符串类型.
 3. 调用`ReactElement`这个构造函数, 并且将`key`传入.
 
 ```js
-// ReactElement的构造函数: 本节就先只关注其中的key属性
-const ReactElement = function (type, key, ref, self, source, owner, props) {
+// v19 ReactElement 构造函数: 移除了 _owner 字段
+const ReactElement = function (type, key, self, source, owner, props) {
   const element = {
     $$typeof: REACT_ELEMENT_TYPE,
     type: type,
     key: key,
-    ref: ref,
-    props: props,
-    _owner: owner,
+    props: props, // v19: ref 直接挂在 props 里 (props.ref), 不再单独拎出来
   };
+  // dev 环境下还会挂 _source / _self 等调试字段
   return element;
 };
 ```

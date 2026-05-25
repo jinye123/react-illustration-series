@@ -126,57 +126,90 @@ lanes 是`17.x`版本中开始引入的重要概念, 代替了`16.x`版本中的
 
 变量定义:
 
-首先看源码[ReactFiberLane.js](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberLane.js#L74-L103)中的定义
+首先看源码[ReactFiberLane.js](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberLane.js)中的定义
 
 ```js
-//类型定义
-export opaque type Lanes = number;
-export opaque type Lane = number;
+// v19 ReactFiberLane.js (节选, 共 31 个比特位, 30+ Lane 变量)
+export type Lanes = number;
+export type Lane = number;
 
-// 变量定义
-export const NoLanes: Lanes = /*                        */ 0b0000000000000000000000000000000;
-export const NoLane: Lane = /*                          */ 0b0000000000000000000000000000000;
+export const TotalLanes = 31;
 
-export const SyncLane: Lane = /*                        */ 0b0000000000000000000000000000001;
-export const SyncBatchedLane: Lane = /*                 */ 0b0000000000000000000000000000010;
+export const NoLanes: Lanes = /*                          */ 0b0000000000000000000000000000000;
+export const NoLane: Lane = /*                            */ 0b0000000000000000000000000000000;
 
-export const InputDiscreteHydrationLane: Lane = /*      */ 0b0000000000000000000000000000100;
-const InputDiscreteLanes: Lanes = /*                    */ 0b0000000000000000000000000011000;
+// 同步车道 (优先级最高)
+export const SyncHydrationLane: Lane = /*                 */ 0b0000000000000000000000000000001;
+export const SyncLane: Lane = /*                          */ 0b0000000000000000000000000000010;
+export const SyncLaneIndex: number = 1;
 
-const InputContinuousHydrationLane: Lane = /*           */ 0b0000000000000000000000000100000;
-const InputContinuousLanes: Lanes = /*                  */ 0b0000000000000000000000011000000;
-// ...
-// ...
+// 连续输入车道
+export const InputContinuousHydrationLane: Lane = /*      */ 0b0000000000000000000000000000100;
+export const InputContinuousLane: Lane = /*               */ 0b0000000000000000000000000001000;
 
-const NonIdleLanes = /*                                 */ 0b0000111111111111111111111111111;
+// 默认车道
+export const DefaultHydrationLane: Lane = /*              */ 0b0000000000000000000000000010000;
+export const DefaultLane: Lane = /*                       */ 0b0000000000000000000000000100000;
 
-export const IdleHydrationLane: Lane = /*               */ 0b0001000000000000000000000000000;
-const IdleLanes: Lanes = /*                             */ 0b0110000000000000000000000000000;
+// v19 同步更新聚合 (用于 syncOnlyHydrationLanes / shouldAttemptEagerTransition 判断)
+export const SyncUpdateLanes: Lane =
+  SyncLane | InputContinuousLane | DefaultLane;
 
-export const OffscreenLane: Lane = /*                   */ 0b1000000000000000000000000000000;
+// Transition 车道族 (v18 新增, 16 条)
+const TransitionHydrationLane: Lane = /*                  */ 0b0000000000000000000000001000000;
+const TransitionLanes: Lanes = /*                         */ 0b0000000001111111111111110000000;
+const TransitionLane1: Lane = /*                          */ 0b0000000000000000000000010000000;
+// ... 省略 Transition2 ~ Transition16
+
+// Retry 车道族 (4 条)
+const RetryLanes: Lanes = /*                              */ 0b0000111100000000000000000000000;
+const RetryLane1: Lane = /*                               */ 0b0000000010000000000000000000000;
+// ... 省略 Retry2 ~ Retry4
+
+export const SelectiveHydrationLane: Lane = /*            */ 0b0001000000000000000000000000000;
+const NonIdleLanes: Lanes = /*                            */ 0b0001111111111111111111111111111;
+
+export const IdleHydrationLane: Lane = /*                 */ 0b0010000000000000000000000000000;
+export const IdleLane: Lane = /*                          */ 0b0100000000000000000000000000000;
+
+export const OffscreenLane: Lane = /*                     */ 0b1000000000000000000000000000000;
+
+// v19 新增: 用于 useDeferredValue
+export const DeferredLane: Lane = /*                      */ 0b10000000000000000000000000000000;
 ```
 
 源码中`Lanes`和`Lane`都是`number`类型, 并且将所有变量都使用二进制位来表示.
 
-注意: 源码中变量只列出了 31 位, 由于 js 中位运算都会转换成`Int32`(上文已经解释), 最多为 32 位, 且最高位是符号位. 所以除去符号位, 最多只有 31 位可以参与运算.
+注意: v19 中`DeferredLane`处于第 32 位(符号位), 与`OffscreenLane`一并组成"会被吸入但不参与车道排序"的特殊车道.
 
-[方法定义](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberLane.js#L121-L194):
+> v17 → v19 关键差异: 删除`SyncBatchedLane / SyncBatchedLanePriority`(automatic batching 取代), 删除`InputDiscreteLane`/`InputDiscreteHydrationLane`(合入`SyncLane`); 新增`SyncHydrationLane`、`TransitionLanes(16)`、`RetryLanes(4)`、`SelectiveHydrationLane`、`DeferredLane`. **`LanePriority`枚举与`return_highestLanePriority`全局变量整体删除**, 优先级直接由比特位高低决定.
+
+[方法定义](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberLane.js):
 
 ```js
+// v19: 直接返回最高优先级的 Lane(s), 不再写"return_highestLanePriority"这种副作用全局变量
 function getHighestPriorityLanes(lanes: Lanes | Lane): Lanes {
-  // 判断 lanes中是否包含 SyncLane
-  if ((SyncLane & lanes) !== NoLanes) {
-    return_highestLanePriority = SyncLanePriority;
-    return SyncLane;
+  const pendingSyncLanes = lanes & SyncUpdateLanes;
+  if (pendingSyncLanes !== 0) {
+    return pendingSyncLanes; // 一次性把同步组的所有 lane 一起 commit
   }
-  // 判断 lanes中是否包含 SyncBatchedLane
-  if ((SyncBatchedLane & lanes) !== NoLanes) {
-    return_highestLanePriority = SyncBatchedLanePriority;
-    return SyncBatchedLane;
+  switch (getHighestPriorityLane(lanes)) {
+    case SyncHydrationLane:           return SyncHydrationLane;
+    case SyncLane:                    return SyncLane;
+    case InputContinuousHydrationLane:return InputContinuousHydrationLane;
+    case InputContinuousLane:         return InputContinuousLane;
+    case DefaultHydrationLane:        return DefaultHydrationLane;
+    case DefaultLane:                 return DefaultLane;
+    case TransitionHydrationLane:     return TransitionHydrationLane;
+    case TransitionLane1: /* ... */:  return lanes & TransitionLanes;
+    case RetryLane1: /* ... */:       return lanes & RetryLanes;
+    case SelectiveHydrationLane:      return SelectiveHydrationLane;
+    case IdleHydrationLane:           return IdleHydrationLane;
+    case IdleLane:                    return IdleLane;
+    case OffscreenLane:               return OffscreenLane;
+    case DeferredLane:                return NoLanes; // DeferredLane 不参与渲染
+    default: return lanes;
   }
-  // ...
-  // ... 省略其他代码
-  return lanes;
 }
 ```
 
@@ -192,12 +225,11 @@ function getHighestPriorityLane(lanes: Lanes) {
 
 通过`lanes & -lanes`可以分离出所有比特位中最右边的 1, 具体来讲:
 
-- 假设 `lanes(InputDiscreteLanes) = 0b0000000000000000000000000011000`
+- 假设 `lanes = 0b0000000000000000000000000011000`(同时包含 DefaultHydrationLane 和 DefaultLane)
 - 那么 `-lanes = 0b1111111111111111111111111101000`
 - 所以 `lanes & -lanes = 0b0000000000000000000000000001000`
-- 相比最初的 InputDiscreteLanes, 分离出来了`最右边的1`
+- 相比最初的 lanes, 分离出来了`最右边的1`
 - 通过 lanes 的定义, 数字越小的优先级越高, 所以此方法可以获取`最高优先级的lane`
--
 
 2. `getLowestPriorityLane`: 分离出最低优先级
 
@@ -211,65 +243,63 @@ function getLowestPriorityLane(lanes: Lanes): Lane {
 
 `clz32(lanes)`返回一个数字在转换成 32 无符号整形数字的二进制形式后, 前导 0 的个数([MDN 上的解释](https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Math/clz32))
 
-- 假设 `lanes(InputDiscreteLanes) = 0b0000000000000000000000000011000`
-- 那么 `clz32(lanes) = 27`, 由于 InputDiscreteLanes 在源码中被书写成了 31 位, 虽然在字面上前导 0 是 26 个, 但是转成标准 32 位后是 27 个
+- 假设 `lanes = 0b0000000000000000000000000011000`
+- 那么 `clz32(lanes) = 27`, 由于源码中被书写成了 31 位, 虽然在字面上前导 0 是 26 个, 但是转成标准 32 位后是 27 个
 - `index = 31 - clz32(lanes) = 4`
 - 最后 `1 << index = 0b0000000000000000000000000010000`
-- 相比最初的 InputDiscreteLanes, 分离出来了`最左边的1`
+- 相比最初的 lanes, 分离出来了`最左边的1`
 - 通过 lanes 的定义, 数字越小的优先级越高, 所以此方法可以获取最低优先级的 lane
 
 ### 执行上下文 ExecutionContext
 
 `ExecutionContext`定义与`react-reconciler`包中, 代表`reconciler`在运行时的上下文状态(在`reconciler 执行上下文`章节中深入解读, 此处介绍位运算的应用).
 
-[变量定义](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberWorkLoop.old.js#L247-L256):
+[变量定义](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberWorkLoop.js):
 
 ```js
-export const NoContext = /*             */ 0b0000000;
-const BatchedContext = /*               */ 0b0000001;
-const EventContext = /*                 */ 0b0000010;
-const DiscreteEventContext = /*         */ 0b0000100;
-const LegacyUnbatchedContext = /*       */ 0b0001000;
-const RenderContext = /*                */ 0b0010000;
-const CommitContext = /*                */ 0b0100000;
-export const RetryAfterError = /*       */ 0b1000000;
-
-// ...
+// v19 简化后只保留 4 种执行上下文 (v17 的 EventContext / DiscreteEventContext / LegacyUnbatchedContext 已删除)
+export const NoContext = /*                */ 0b000;
+const BatchedContext = /*                  */ 0b001;
+const RenderContext = /*                   */ 0b010;
+const CommitContext = /*                   */ 0b100;
 
 // Describes where we are in the React execution stack
 let executionContext: ExecutionContext = NoContext;
 ```
 
-注意: 和`lanes`的定义不同, `ExecutionContext`类型的变量, 在定义的时候采取的是 8 位二进制表示(因为变量的数量少, 8 位就够了, 没有必要写成 31 位).
+> v17 → v19 关键差异: `EventContext / DiscreteEventContext / LegacyUnbatchedContext`已删除, 优先级追踪迁移到`getCurrentUpdatePriority()` + `ReactSharedInternals.T`; 渲染中是否需要重新调度由`workInProgressRootRenderPhaseUpdatedLanes`等专用字段管理, 不再依赖`executionContext`位.
 
-使用(由于使用的地方较多, 所以举一个[代表性强的例子](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberWorkLoop.old.js#L517-L619), `scheduleUpdateOnFiber` 函数是`react-reconciler`包对`react`包暴露出来的 api, 每一次更新都会调用, 所以比较特殊):
+注意: 和`lanes`的定义不同, `ExecutionContext`类型的变量, 在定义的时候采取的是 3 位二进制表示(因为变量的数量少, 3 位就够了, 没有必要写成 31 位).
+
+使用(由于使用的地方较多, 所以举一个[代表性强的例子](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberWorkLoop.js), `scheduleUpdateOnFiber` 函数是`react-reconciler`包对`react`包暴露出来的 api, 每一次更新都会调用, 所以比较特殊):
 
 ```js
 // scheduleUpdateOnFiber函数中包含了好多关于executionContext的判断(都是使用位运算)
+// v19: scheduleUpdateOnFiber 不再接收 eventTime (v18 起删除), 增加 root 参数
 export function scheduleUpdateOnFiber(
+  root: FiberRoot,
   fiber: Fiber,
   lane: Lane,
-  eventTime: number,
 ) {
   if (root === workInProgressRoot) {
-    // 判断: executionContext 不包含 RenderContext
+    // 判断: 是否在渲染期间又触发了新的更新
     if (
       deferRenderPhaseUpdateToNextBatch ||
       (executionContext & RenderContext) === NoContext
     ) {
-      // ...
+      // 标记 render-phase-updated lanes
+      workInProgressRootRenderPhaseUpdatedLanes = mergeLanes(
+        workInProgressRootRenderPhaseUpdatedLanes,
+        lane,
+      );
+    }
+    // 检查是否需要中断当前渲染
+    if (workInProgressSuspendedReason === SuspendedOnData) {
+      prepareFreshStack(root, NoLanes);
     }
   }
-  if (lane === SyncLane) {
-    if (
-      // 判断: executionContext 包含 LegacyUnbatchedContext
-      (executionContext & LegacyUnbatchedContext) !== NoContext &&
-      // 判断: executionContext 不包含 RenderContext或CommitContext
-      (executionContext & (RenderContext | CommitContext)) === NoContext
-    ) {
-      // ...
-    }
-  }
+  // v18+ 统一通过 ReactFiberRootScheduler 处理同步/异步
+  ensureRootIsScheduled(root);
   // ...
 }
 ```

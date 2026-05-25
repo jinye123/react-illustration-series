@@ -10,14 +10,14 @@ order: 0
 
 ## 概念
 
-调和函数([源码](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactChildFiber.old.js#L1274-L1410))是在`fiber树构(对比更新)`过程中对`旧fiber节点`与`新reactElement`进行比较, 判定`旧fiber节点`是否可以复用的一个比较函数.
+调和函数([源码](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactChildFiber.js))是在`fiber树构(对比更新)`过程中对`旧fiber节点`与`新reactElement`进行比较, 判定`旧fiber节点`是否可以复用的一个比较函数.
 
 调和函数仅是`fiber树构造`过程中的一个环节, 所以在深入理解这个函数之前, 建议对`fiber树构造`有一个宏观的理解(可以参考前文[fiber 树构造(初次创建)](../main/fibertree-create.md), [fiber 树构造(对比更新)](../main/fibertree-update.md)), 本节重点探讨其算法的实现细节.
 
 它的主要作用:
 
-1. 给新增,移动,和删除节点设置`fiber.flags`(新增, 移动: `Placement`, 删除: `Deletion`)
-2. 如果是需要删除的`fiber`, [除了自身打上`Deletion`之外, 还要将其添加到父节点的`effects`链表中](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactChildFiber.old.js#L275-L294)(正常副作用队列的处理是在`completeWork`函数, 但是该节点(被删除)会脱离`fiber`树, 不会再进入`completeWork`阶段, 所以在`beginWork`阶段提前加入副作用队列).
+1. 给新增、移动节点设置`fiber.flags`(`Placement`); 删除节点放入父 fiber 的`deletions: Fiber[]`数组, 父节点打上`ChildDeletion`标志位(v18+ 行为, 不再使用 v17 的`Deletion`标志).
+2. 如果是需要删除的`fiber`, [需要将其添加到父节点的`fiber.deletions: Fiber[]`数组中, 同时父节点 fiber.flags 打上`ChildDeletion`位](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactChildFiber.js)(v18 起 effect 链表已删除, 删除信息直接由父节点维护; 父节点会在 commit 阶段的`recursivelyTraverseMutationEffects`开头先处理`deletions`).
 
 ## 特性
 
@@ -34,7 +34,7 @@ order: 0
 
 ### 单节点比较
 
-单节点的逻辑比较简明, 先直接看[源码](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactChildFiber.old.js#L1135-L1233):
+单节点的逻辑比较简明, 先直接看[源码](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactChildFiber.js):
 
 ```js
 // 只保留主干逻辑
@@ -97,7 +97,7 @@ function reconcileSingleElement(
 
 ### 可迭代节点比较(数组类型, [Symbol.iterator]=fn,[@@iterator]=fn)
 
-可迭代节点比较, 在[源码中](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactChildFiber.old.js#L1346-L1362)被分为了 2 个部分:
+可迭代节点比较, 在[源码中](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactChildFiber.js)被分为了 2 个部分:
 
 ```js
 function reconcileChildFibers(
@@ -125,7 +125,7 @@ function reconcileChildFibers(
 }
 ```
 
-其中`reconcileChildrenArray函数`(针对数组类型)和`reconcileChildrenIterator`(针对可迭代类型)的核心逻辑几乎一致, 下文将分析[`reconcileChildrenArray()`函数](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactChildFiber.old.js#L771-L924). 如果是新增节点, 所有的比较逻辑都无法命中, 只有`对比更新`过程, 才有实际作用, 所以下文重点分析`对比更新`的情况.
+其中`reconcileChildrenArray函数`(针对数组类型)和`reconcileChildrenIterator`(针对可迭代类型)的核心逻辑几乎一致, 下文将分析[`reconcileChildrenArray()`函数](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactChildFiber.js). 如果是新增节点, 所有的比较逻辑都无法命中, 只有`对比更新`过程, 才有实际作用, 所以下文重点分析`对比更新`的情况.
 
 ```js
 function reconcileChildrenArray(
@@ -299,7 +299,7 @@ if (shouldTrackSideEffects) {
 
 ### 结果
 
-无论是单节点还是可迭代节点的比较, 最终的目的都是生成下级子节点. 并在`reconcileChildren`过程中, 给一些有副作用的节点(新增, 删除, 移动位置等)打上副作用标记, 等待 commit 阶段(参考[fiber 树渲染](../main/commit.md))的处理.
+无论是单节点还是可迭代节点的比较, 最终的目的都是生成下级子节点. 并在`reconcileChildren`过程中, 给一些有副作用的节点(新增, 删除, 移动位置等)打上副作用标记, 等待 commit 阶段(参考[fiber 树渲染](../main/fibertree-commit.md))的处理.
 
 ## 总结
 

@@ -119,7 +119,7 @@ function LinkedList() {
 
 1. `class`组件中
 
-   - 在`class`组件中调用`setState`, 会创建`update`对象并添加到`fiber.updateQueue.shared.pending`链式队列([源码地址](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactUpdateQueue.old.js#L198-L230)).
+   - 在`class`组件中调用`setState`, 会创建`update`对象并添加到`fiber.updateQueue.shared.pending`链式队列([源码地址](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberClassUpdateQueue.js)).
 
      ```js
      export function enqueueUpdate<State>(fiber: Fiber, update: Update<State>) {
@@ -142,7 +142,7 @@ function LinkedList() {
 
      ![](../../snapshots/linkedlist/fiber.updatequeue.png)
 
-   - 在`fiber`树构建阶段(或`reconciler`阶段), 会把`fiber.updateQueue.shared.pending`合并到`fiber.updateQueue.firstBaseUpdate`队列上([源码地址](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactUpdateQueue.old.js#L394-L572)).
+   - 在`fiber`树构建阶段(或`reconciler`阶段), 会把`fiber.updateQueue.shared.pending`合并到`fiber.updateQueue.firstBaseUpdate`队列上([源码地址](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberClassUpdateQueue.js)).
 
      ```js
      export function processUpdateQueue<State>(
@@ -181,16 +181,17 @@ function LinkedList() {
 
 2. `function`组件中
 
-   - 在`function`组件中使用`Hook`对象(`useState`), 并改变`Hook`对象的值(内部会调用`dispatchAction`), 此时也会创建`update(hook)`对象并添加到`hook.queue.pending`链式队列([源码地址](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1645-L1682)).
+   - 在`function`组件中使用`Hook`对象(`useState` / `useReducer`), 并改变`Hook`对象的值时, 内部会调用`dispatchSetState`(useState) 或 `dispatchReducerAction`(useReducer), v18 起这两个函数从原来的`dispatchAction`拆分而来. 它们都会创建`update(hook)`对象并通过`enqueueConcurrentHookUpdate`接入并发队列, 最终挂到`hook.queue.pending`环形链表([源码地址](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)).
    - `hook.queue.pending`也是一个环形链表(与`fiber.updateQueue.shared.pending`的结构很相似)
 
      ```js
-     function dispatchAction<S, A>(
+     // v19 简化版: dispatchSetState 和 dispatchReducerAction 的链表入队逻辑一致
+     function enqueueConcurrentHookUpdate<S, A>(
        fiber: Fiber,
        queue: UpdateQueue<S, A>,
-       action: A,
-     ) {
-       // ... 省略部分代码
+       update: Update<S, A>,
+       lane: Lane,
+     ): FiberRoot | null {
        const pending = queue.pending;
        if (pending === null) {
          // This is the first update. Create a circular list.
@@ -200,10 +201,11 @@ function LinkedList() {
          pending.next = update;
        }
        queue.pending = update;
+       return getRootForUpdatedFiber(fiber);
      }
      ```
 
-   - 在`fiber`树构建阶段(或`reconciler`阶段), 会将`hook.queue.pending`合并到`hook.baseQueue`队列上([源码地址](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L672-L694)).
+   - 在`fiber`树构建阶段(或`reconciler`阶段), 会将`hook.queue.pending`合并到`hook.baseQueue`队列上([源码地址](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)).
 
      ```js
      function updateReducer<S, I, A>(

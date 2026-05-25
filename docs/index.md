@@ -14,7 +14,7 @@ keywords:
   ]
 hero:
   title: 图解React原理
-  description: 基于[`react@17.0.2`](https://github.com/facebook/react/tree/v17.0.2)(尽可能跟随 react 版本的升级, 持续更新). 用大量配图的方式, 致力于将`react原理`表述清楚.
+  description: 基于[`react@19.2.6`](https://github.com/facebook/react/tree/v19.2.6)(尽可能跟随 react 版本的升级, 持续更新). 用大量配图的方式, 致力于将`react原理`表述清楚.
   actions:
     - text: 开始学习
       link: /main/macro-structure

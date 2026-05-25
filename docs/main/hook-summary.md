@@ -31,51 +31,51 @@ order: 1
 通过官网文档的讲解, 能快速掌握`Hook`的使用. 再结合前文[状态与副作用](./state-effects.md)的介绍, 我们知道使用`Hook`最终也是为了控制`fiber节点`的`状态`和`副作用`. 从`fiber`视角, 状态和副作用相关的属性如下(这里不再解释单个属性的意义, 可以回顾[状态与副作用](./state-effects.md)):
 
 ```js
-export type Fiber = {|
+export type Fiber = {
   // 1. fiber节点自身状态相关
   pendingProps: any,
   memoizedProps: any,
   updateQueue: mixed,
   memoizedState: any,
 
-  // 2. fiber节点副作用(Effect)相关
+  // 2. fiber节点副作用(Effect)相关 (v18 起 effectList 链表已删除)
   flags: Flags,
-  nextEffect: Fiber | null,
-  firstEffect: Fiber | null,
-  lastEffect: Fiber | null,
-|};
+  subtreeFlags: Flags,
+  deletions: Array<Fiber> | null,
+};
 ```
 
 使用`Hook`的任意一个`api`, 最后都是为了控制上述这几个`fiber属性`.
 
 ## Hook 数据结构
 
-在[ReactFiberHooks](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L95-L140)中, 定义了`Hook`的数据结构:
+在[ReactFiberHooks](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)中, 定义了`Hook`的数据结构:
 
 ```js
-type Update<S, A> = {|
+type Update<S, A> = {
   lane: Lane,
+  revertLane: Lane, // v18 新增: useTransition / useDeferredValue 需要回退优先级
   action: A,
-  eagerReducer: ((S, A) => S) | null,
+  hasEagerState: boolean, // v18 新增: 是否计算过 eagerState (v17 字段名为 eagerReducer)
   eagerState: S | null,
   next: Update<S, A>,
-  priority?: ReactPriorityLevel,
-|};
+};
 
-type UpdateQueue<S, A> = {|
+type UpdateQueue<S, A> = {
   pending: Update<S, A> | null,
+  lanes: Lanes, // v18 新增: 队列上挂载的所有 update 的 lanes 聚合
   dispatch: ((A) => mixed) | null,
   lastRenderedReducer: ((S, A) => S) | null,
   lastRenderedState: S | null,
-|};
+};
 
-export type Hook = {|
+export type Hook = {
   memoizedState: any, // 当前状态
   baseState: any, // 基状态
   baseQueue: Update<any, any> | null, // 基队列
-  queue: UpdateQueue<any, any> | null, // 更新队列
+  queue: any, // 更新队列 (UpdateQueue 或 effect 链表头, 视 hook 种类而定)
   next: Hook | null, // next指针
-|};
+};
 ```
 
 从定义来看, `Hook`对象共有 5 个属性(有关这些属性的应用, 将在`Hook 原理(状态)`章节中具体分析.):
@@ -94,7 +94,7 @@ export type Hook = {|
 
 ## Hook 分类
 
-在`v17.0.2`中, 共定义了[14 种 Hook](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L111-L125)
+在`v19.2.6`中, 共定义了 25+ 种 Hook(详见[ReactFiberHooks.js](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)):
 
 ```js
 export type HookType =
@@ -103,6 +103,8 @@ export type HookType =
   | 'useContext'
   | 'useRef'
   | 'useEffect'
+  | 'useEffectEvent' // v19.2 experimental
+  | 'useInsertionEffect' // v18 新增
   | 'useLayoutEffect'
   | 'useCallback'
   | 'useMemo'
@@ -110,11 +112,19 @@ export type HookType =
   | 'useDebugValue'
   | 'useDeferredValue'
   | 'useTransition'
-  | 'useMutableSource'
-  | 'useOpaqueIdentifier';
+  | 'useSyncExternalStore' // v18 新增
+  | 'useId' // v18 新增
+  | 'useCacheRefresh' // v18 新增 (Server Component / Cache)
+  | 'useActionState' // v19 新增 (前身 useFormState)
+  | 'useOptimistic' // v19 新增
+  | 'use' // v19 新增, 唯一可以条件调用的 hook
+  | 'useMemoCache' // v19 React Compiler 编译产物使用
+  | 'useHostTransitionStatus'; // v19 useFormStatus 内部使用
 ```
 
-官网上已经将其分为了 2 个类别, 状态`Hook`(`State Hook`), 和副作用`Hook`(`Effect Hook`).
+> 与 v17 的差异: 移除了`useMutableSource`(被`useSyncExternalStore`取代)、`useOpaqueIdentifier`(被`useId`取代). 新增了上述 v18 / v19 的所有 hook.
+
+官网上已经将其分为了 2 个类别, 状态`Hook`(`State Hook`)和副作用`Hook`(`Effect Hook`).
 
 这里我们可以结合前文[状态与副作用](./state-effects.md), 从`fiber`的视角去理解`状态Hook`与`副作用Hook`的区别.
 
@@ -128,27 +138,33 @@ export type HookType =
 
 ### 副作用 Hook
 
-回到`fiber`视角, `状态Hook`实现了状态持久化(等同于`class组件`维护`fiber.memoizedState`), 那么`副作用Hook`则会修改`fiber.flags`. (通过前文`fiber树构造`系列的解读, 我们知道在`performUnitOfWork->completeWork`阶段, 所有存在副作用的`fiber`节点, 都会被添加到父节点的`副作用队列`后, 最后在`commitRoot`阶段处理这些`副作用节点`.)
+回到`fiber`视角, `状态Hook`实现了状态持久化(等同于`class组件`维护`fiber.memoizedState`), 那么`副作用Hook`则会修改`fiber.flags`. 通过前文`fiber树构造`系列的解读, 我们知道在`performUnitOfWork->completeWork`阶段, 节点上的`flags`会向上冒泡为父节点的`subtreeFlags`, 最后在`commitRoot`阶段通过 DFS 处理这些`副作用节点`.
 
 另外, `副作用Hook`还提供了`副作用回调`(类似于`class组件`的生命周期回调), 比如:
 
 ```js
-// 使用useEffect时, 需要传入一个副作用回调函数.
-// 在fiber树构造完成之后, commitRoot阶段会处理这些副作用回调
+// 使用 useEffect 时, 需要传入一个副作用回调函数.
+// 在 fiber 树构造完成之后, commitRoot 阶段会处理这些副作用回调
 useEffect(() => {
   console.log('这是一个副作用回调函数');
 }, []);
 ```
 
-在`react`内部, `useEffect`就是最标准的`副作用Hook`. 其他比如`useLayoutEffect`以及`自定义Hook`, 如果要实现`副作用`, 必须直接或间接的调用`useEffect`.
+在`react`内部, 有 3 个标准的`副作用Hook`(它们底层都共用同一个 effect 链表, 只是带不同的 hookFlags):
 
-有关`useEffect`具体实现细节, 在`Hook原理(副作用)`章节中讨论.
+| Hook                        | hook 类型常量   | fiber.flags | 执行时机                                                  |
+| --------------------------- | --------------- | ----------- | --------------------------------------------------------- |
+| `useInsertionEffect` (v18+) | `HookInsertion` | `Update`    | mutation 阶段同步执行, 早于 layout, 给 CSS-in-JS 注入样式 |
+| `useLayoutEffect`           | `HookLayout`    | `Update`    | layout 阶段同步执行                                       |
+| `useEffect`                 | `HookPassive`   | `Passive`   | commit 完成后异步冲刷 (`flushPassiveEffects`)             |
+
+有关具体实现细节, 在`Hook原理(副作用)`章节中讨论.
 
 ### 组合 Hook
 
 虽然官网并无`组合Hook`的说法, 但事实上大多数`Hook`(包括自定义`Hook`)都是由上述 2 种 `Hook`组合而成, 同时拥有这 2 种 Hook 的特性.
 
-- 在`react`内部有`useDeferredValue, useTransition, useMutableSource, useOpaqueIdentifier`等.
+- 在`react`内部有`useDeferredValue, useTransition, useSyncExternalStore, useId, useActionState, useOptimistic`等.
 - 平时开发中, `自定义Hook`大部分都是组合 Hook.
 
 比如官网上的[自定义 Hook](https://zh-hans.reactjs.org/docs/hooks-custom.html#extracting-a-custom-hook)例子:
@@ -180,9 +196,9 @@ function useFriendStatus(friendID) {
 
 ### 处理函数
 
-从`fiber树构造`的视角来看, 不同的`fiber`类型, 只需要调用不同的`处理函数`返回`fiber子节点`. 所以在[performUnitOfWork->beginWork](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberBeginWork.old.js#L3340-L3354)函数中, 调用了多种`处理函数`. 从调用方来讲, 无需关心`处理函数`的内部实现(比如`updateFunctionComponent`内部使用了`Hook对象`, `updateClassComponent`内部使用了`class实例`).
+从`fiber树构造`的视角来看, 不同的`fiber`类型, 只需要调用不同的`处理函数`返回`fiber子节点`. 所以在[performUnitOfWork->beginWork](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberBeginWork.js)函数中, 调用了多种`处理函数`. 从调用方来讲, 无需关心`处理函数`的内部实现(比如`updateFunctionComponent`内部使用了`Hook对象`, `updateClassComponent`内部使用了`class实例`).
 
-本节讨论`Hook`, 所以列出其中的[updateFunctionComponent](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberBeginWork.old.js#L702-L783)函数:
+本节讨论`Hook`, 所以列出其中的[updateFunctionComponent](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberBeginWork.js)函数:
 
 ```js
 // 只保留FunctionComponent相关:
@@ -239,11 +255,11 @@ function updateFunctionComponent(
 }
 ```
 
-在`updateFunctionComponent`函数中调用了[renderWithHooks](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L342-L476)(位于[ReactFiberHooks](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js)) , 至此`Fiber`与`Hook`产生了关联.
+在`updateFunctionComponent`函数中调用了[renderWithHooks](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)(位于[ReactFiberHooks](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)), 至此`Fiber`与`Hook`产生了关联.
 
 ### 全局变量
 
-在分析`renderWithHooks`函数前, 有必要理解[ReactFiberHooks](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js)头部定义的全局变量(源码中均有英文注释):
+在分析`renderWithHooks`函数前, 有必要理解[ReactFiberHooks](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)头部定义的全局变量(源码中均有英文注释):
 
 ```js
 // 渲染优先级
@@ -264,6 +280,10 @@ let didScheduleRenderPhaseUpdate: boolean = false;
 // 在本次function的执行过程中, 是否再次发起了更新. 每一次调用function都会被重置
 let didScheduleRenderPhaseUpdateDuringThisPass: boolean = false;
 
+// v18+ 新增: thenable 列表与索引, 配合 use(promise) 实现挂起/恢复
+let thenableIndexCounter: number = 0;
+let thenableState: ThenableState | null = null;
+
 // 在本次function的执行过程中, 重新发起更新的最大次数
 const RE_RENDER_LIMIT = 25;
 ```
@@ -277,7 +297,7 @@ const RE_RENDER_LIMIT = 25;
 
 ### renderWithHooks 函数
 
-[renderWithHooks](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L342-L476)源码看似较长, 但是去除 dev 后保留主干, 逻辑十分清晰. 以调用`function`为分界点, 逻辑被分为 3 个部分:
+[renderWithHooks](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)源码看似较长, 但是去除 dev 后保留主干, 逻辑十分清晰. 以调用`function`为分界点, 逻辑被分为 3 个部分:
 
 ```js
 // ...省略无关代码
@@ -299,12 +319,13 @@ export function renderWithHooks<Props, SecondArg>(
   workInProgress.lanes = NoLanes;
 
   // --------------- 2. 调用function,生成子级ReactElement对象 -------------------
-  // 指定dispatcher, 区分mount和update
-  ReactCurrentDispatcher.current =
+  // v19 起 dispatcher 通过 ReactSharedInternals.H 设置 (v17 是 ReactCurrentDispatcher.current)
+  // 指定 dispatcher, 区分 mount 和 update
+  ReactSharedInternals.H =
     current === null || current.memoizedState === null
       ? HooksDispatcherOnMount
       : HooksDispatcherOnUpdate;
-  // 执行function函数, 其中进行分析Hooks的使用
+  // 执行function函数, 其中分析Hooks的使用
   let children = Component(props, secondArg);
 
   // --------------- 3. 重置全局变量,并返回 -------------------
@@ -366,7 +387,7 @@ export default function App() {
 
 当执行`renderWithHooks`时, 开始调用`function`. 本例中, 在`function`内部, 共使用了 4 次`Hook api`, 依次调用`useState, useEffect, useState, useEffect`.
 
-而`useState, useEffect`在`fiber`初次构造时分别对应[mountState](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1113-L1136)和[mountEffect->mountEffectImpl](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1193-L1248)
+而`useState, useEffect`在`fiber`初次构造时分别对应[mountState](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)和[mountEffect->mountEffectImpl](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)
 
 ```js
 function mountState<S>(
@@ -387,7 +408,7 @@ function mountEffectImpl(fiberFlags, hookFlags, create, deps): void {
 
 ### 链表存储
 
-而[mountWorkInProgressHook](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L531-L550)非常简单:
+而[mountWorkInProgressHook](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)非常简单:
 
 ```js
 function mountWorkInProgressHook(): Hook {
@@ -430,7 +451,7 @@ function mountWorkInProgressHook(): Hook {
 
 注意: 在`renderWithHooks`函数中已经设置了`workInProgress.memoizedState = null`, 等待调用`function`时重新设置.
 
-接下来调用`function`, 同样依次调用`useState, useEffect, useState, useEffect`. 而`useState, useEffect`在`fiber`对比更新时分别对应[updateState->updateReducer](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1138-L1142)和[updateEffect->updateEffectImpl](https://github.com/facebook/react/blob/v17.0.2/packages/react-reconciler/src/ReactFiberHooks.old.js#L1205-L1266)
+接下来调用`function`, 同样依次调用`useState, useEffect, useState, useEffect`. 而`useState, useEffect`在`fiber`对比更新时分别对应[updateState->updateReducer](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)和[updateEffect->updateEffectImpl](https://github.com/facebook/react/blob/v19.2.6/packages/react-reconciler/src/ReactFiberHooks.js)
 
 ```js
 // ----- 状态Hook --------
@@ -519,3 +540,10 @@ function updateWorkInProgressHook(): Hook {
 ## 总结
 
 本节首先引入了官方文档上对于`Hook`的解释, 了解`Hook`的由来, 以及`Hook`相较于`class`的优势. 然后从`fiber`视角分析了`fiber`与`hook`的内在关系, 通过`renderWithHooks`函数, 把`Hook`链表挂载到了`fiber.memoizedState`之上. 利用`fiber树`内部的双缓冲技术, 实现了`Hook`从`current`到`workInProgress`转移, 进而实现了`Hook`状态的持久化.
+
+v18/v19 时期的 Hook 体系最显著的变化:
+
+1. **Hook 数量大幅增加**: 从 v17 的 14 种增加到 v19 的 25+ 种, 围绕"并发渲染"(`useTransition / useDeferredValue / useSyncExternalStore / useId`)和"Actions"(`useActionState / useOptimistic / useFormStatus`)展开.
+2. **新增 `use` hook**: 唯一允许在条件/循环中调用的 hook, 可以挂起读 Promise 或读 Context. 它的实现走的是单独的 thenable 路径, 不创建 Hook 对象.
+3. **dispatcher 入口变更**: `ReactCurrentDispatcher.current → ReactSharedInternals.H`.
+4. **Update 类型增强**: 新增`revertLane`(配合 transition 回退)与`hasEagerState`(替代`eagerReducer`).

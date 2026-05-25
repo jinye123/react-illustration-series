@@ -1,6 +1,6 @@
 # 图解 React 源码系列
 
-> `react`源码, 基于[`react@17.0.2`](https://github.com/facebook/react/tree/v17.0.2)(尽可能跟随 react 版本的升级, 持续更新). 用大量配图的方式, 致力于将`react`原理表述清楚.
+> `react`源码, 基于[`react@19.2.6`](https://github.com/facebook/react/tree/v19.2.6)(尽可能跟随 react 版本的升级, 持续更新). 用大量配图的方式, 致力于将`react`原理表述清楚.
 
 ## 使用指南
 
@@ -24,15 +24,43 @@
 
 - [`react@17.0.0`](https://github.com/facebook/react/releases/tag/v17.0.0)作为主版本升级, 相较于 16.x 版本, 在使用层面基本维持不变, 在源码层面需要关注的重大的变动如下
 
-
-    | 重大变动                                                      | 所属板块                                    | 官方解释                                                                                                      |
-    | ------------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-    | 重构`Fiber.expirationTime`并引入`Fiber.lanes`                 | `react-reconciler`                          | [Initial Lanes implementation #18796](https://github.com/facebook/react/pull/18796)                           |
-    | 事件代理节点从 document 变成 rootNode, 取消合成事件的缓存池等 | `legacy-events(被移除)`, `react-dom/events` | [changes-to-event-delegation](https://reactjs.org/blog/2020/10/20/react-v17.html#changes-to-event-delegation) |
+  | 重大变动                                                      | 所属板块                                    | 官方解释                                                                                                      |
+  | ------------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+  | 重构`Fiber.expirationTime`并引入`Fiber.lanes`                 | `react-reconciler`                          | [Initial Lanes implementation #18796](https://github.com/facebook/react/pull/18796)                           |
+  | 事件代理节点从 document 变成 rootNode, 取消合成事件的缓存池等 | `legacy-events(被移除)`, `react-dom/events` | [changes-to-event-delegation](https://reactjs.org/blog/2020/10/20/react-v17.html#changes-to-event-delegation) |
 
 - [`react@17.0.1`](https://github.com/facebook/react/releases/tag/v17.0.1)相较于主版本`v17.0.0`做了一个点的优化, [改动了 1 个文件](https://github.com/facebook/react/compare/v17.0.0...v17.0.1), 修复 ie11 兼容问题, 同时提升 v8 内部的执行性能.
 
-* [`react@17.0.2`](https://github.com/facebook/react/releases/tag/v17.0.2)相较于`v17.0.1`, 改动集中于`Scheduler`包, 主干逻辑没有变动, 只与调度[性能统计相关](https://github.com/facebook/react/compare/v17.0.1...v17.0.2).
+- [`react@17.0.2`](https://github.com/facebook/react/releases/tag/v17.0.2)相较于`v17.0.1`, 改动集中于`Scheduler`包, 主干逻辑没有变动, 只与调度[性能统计相关](https://github.com/facebook/react/compare/v17.0.1...v17.0.2).
+
+- [`react@18.0.0`](https://github.com/facebook/react/releases/tag/v18.0.0)是 react 自 fiber 架构以来变动最大的一次主版本, 在源码层面需要关注的重大变动如下
+
+  | 重大变动                                                                                                               | 所属板块           | 官方解释                                                                               |
+  | ---------------------------------------------------------------------------------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------- |
+  | 移除`ReactDOM.render`,新增`createRoot/hydrateRoot`, 取消`legacy/blocking/concurrent`三种模式, 全部走 Concurrent 渲染器 | `react-dom`        | [How to Upgrade to React 18](https://react.dev/blog/2022/03/08/react-18-upgrade-guide) |
+  | 自动批处理(`automatic batching`): Promise/setTimeout/原生事件中的多次`setState`也会合并                                | `react-reconciler` | [automatic-batching](https://github.com/reactwg/react-18/discussions/21)               |
+  | 删除`Fiber.firstEffect/nextEffect/lastEffect`副作用链表, 改用`subtreeFlags`子树标志位 DFS 提交                         | `react-reconciler` | [Effects list refactor](https://github.com/facebook/react/pull/19388)                  |
+  | 引入`useSyncExternalStore`, `useInsertionEffect`, `useTransition`, `useDeferredValue`, `useId`                         | `react`            | [新 hooks 概览](https://react.dev/blog/2022/03/29/react-v18#new-hooks)                 |
+  | `.old.js / .new.js`双轨制后期合并为单一文件(无后缀)                                                                    | `react-reconciler` | [Remove .old/.new fork](https://github.com/facebook/react/pull/26288)                  |
+
+- [`react@19.0.0`](https://github.com/facebook/react/releases/tag/v19.0.0)在 18 的 Concurrent 基础上, 进一步打磨调度与异步编程模型, 在源码层面需要关注的重大变动如下
+
+  | 重大变动                                                                               | 所属板块                                              | 官方解释                                                                                  |
+  | -------------------------------------------------------------------------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+  | `Actions`: `startTransition`支持`async`函数, 自动管理`pending/error/optimistic`状态    | `react`,`react-reconciler`                            | [React v19 - Actions](https://react.dev/blog/2024/12/05/react-19#actions)                 |
+  | 新 hook `use(promise                                                                   | context)`: 渲染期挂起读取 Promise/Context, 可条件调用 | `react`                                                                                   | [React v19 - use](https://react.dev/blog/2024/12/05/react-19#new-api-use) |
+  | 新 hook `useActionState`, `useOptimistic`, `useFormStatus`                             | `react`,`react-dom`                                   | [新 hooks](https://react.dev/blog/2024/12/05/react-19#new-hook-useactionstate)            |
+  | `ref`可以作为 prop 传递, `forwardRef`不再必需                                          | `react`                                               | [ref as a prop](https://react.dev/blog/2024/12/05/react-19#ref-as-a-prop)                 |
+  | `<Context value=...>` 替代 `<Context.Provider value=...>`                              | `react`                                               | [Context as a Provider](https://react.dev/blog/2024/12/05/react-19#context-as-a-provider) |
+  | Suspense 兄弟预热(`sibling pre-warming`): fallback 立即 commit, 不再阻塞渲染兄弟节点   | `react-reconciler`                                    | [#26380](https://github.com/facebook/react/pull/26380)                                    |
+  | 移除`prepareUpdate`(HostComponent diff 推迟到 commit 阶段)                             | `react-reconciler`                                    | [#26583](https://github.com/facebook/react/pull/26583)                                    |
+  | 更新调度移到`microtask`, 替代`Promise.resolve().then`/`MessageChannel`                 | `react-reconciler`                                    | [#26512](https://github.com/facebook/react/pull/26512)                                    |
+  | 同步、连续、默认 lane 合并批处理(`batch sync discrete, continuous, and default lanes`) | `react-reconciler`                                    | [#25700](https://github.com/facebook/react/pull/25700)                                    |
+  | Suspense 节流从`500ms`下调为`300ms`                                                    | `react-reconciler`                                    | [#26803](https://github.com/facebook/react/pull/26803)                                    |
+  | 移除`scheduler/tracing`                                                                | `scheduler`                                           | [Remove scheduler tracing](https://github.com/facebook/react/pull/25814)                  |
+  | `<Context>`简写、字符串`ref`、`defaultProps`(函数组件)、`PropTypes`移除                | `react`                                               | [Removed APIs](https://react.dev/blog/2024/12/05/react-19#removed-deprecated-react-apis)  |
+
+- [`react@19.2.x`](https://github.com/facebook/react/releases/tag/v19.2.6) 小版本系列对`React Server Components`、`useEffectEvent`、`<Activity>`等持续打磨, 主干逻辑保持稳定.
 
 ## 主要内容
 
@@ -79,3 +107,4 @@
 
 - [基于 v16.13.1 版本的分析](https://github.com/7kms/react-illustration-series/tree/v16.13.1)
 - [基于 v17.0.1 版本的分析](https://github.com/7kms/react-illustration-series/tree/v17.0.1)
+- [基于 v17.0.2 版本的分析](https://github.com/7kms/react-illustration-series/tree/v17.0.2)

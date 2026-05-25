@@ -54,7 +54,33 @@ export default App;
 
 ![](../../snapshots/bootstrap/process-concurrent.png)
 
-> 注: v17 时期还存在 legacy/blocking 启动方式的内存状态图, v18+ 已经统一为 createRoot(ConcurrentRoot) 一条线, 上面这张图同样适用于 hydrateRoot. 旧的 `process-legacy.png` / `process-blocking.png` 已不再适用, 图待重绘.
+> 注: v17 时期还存在 legacy/blocking 启动方式的内存状态图, v18+ 已经统一为 createRoot(ConcurrentRoot) 一条线, 上面这张图同样适用于 hydrateRoot. 旧的 `process-legacy.png` / `process-blocking.png` 已不再适用.
+
+下方为 v19 等价的初始内存状态图(Mermaid):
+
+```mermaid
+flowchart LR
+  subgraph Browser["浏览器 DOM"]
+    D["div#root"]
+  end
+  subgraph ReactDOM["react-dom (client)"]
+    RDR["ReactDOMRoot"]
+  end
+  subgraph Reconciler["react-reconciler"]
+    FR["FiberRoot<br/>pendingLanes = NoLanes<br/>current → HostRootFiber"]
+    HRF["HostRootFiber<br/>mode = ConcurrentMode<br/>updateQueue.shared.pending = update0"]
+    U0["update0<br/>payload = { element: <App/> }<br/>lane = SyncLane (首次渲染)"]
+  end
+  AE["reactElement <App/>"]
+  RDR -- "_internalRoot" --> FR
+  FR -- "current" --> HRF
+  FR -- "containerInfo" --> D
+  HRF -- "stateNode" --> FR
+  HRF -- "updateQueue" --> U0
+  AE -- "存入 update0.payload.element" --> U0
+```
+
+> 进入`updateContainer → scheduleUpdateOnFiber → performWorkOnRoot`后, 才会基于这棵"光秃秃的 HostRootFiber"展开 v19 的 fiber 树构造过程.
 
 根据这个结构, 可以在控制台中打出当前页面对应的`fiber`树(用于观察其结构):
 

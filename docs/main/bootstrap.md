@@ -73,7 +73,31 @@ order: 1
 
 ![](../../snapshots/bootstrap/function-call.png)
 
-> 注: 该图绘制于 v17 时期, 当时分 legacy/blocking/concurrent 三条线; v19 中只剩 `createRoot → ReactDOMRoot → createContainer → createFiberRoot → createHostRootFiber` 一条线, 图待重绘.
+> 注: 该图绘制于 v17 时期, 当时分 legacy/blocking/concurrent 三条线; v19 中只剩 `createRoot → ReactDOMRoot → createContainer → createFiberRoot → createHostRootFiber` 一条线.
+
+下方为 v19 等价流程图(Mermaid, 如未渲染请复制到 [mermaid.live](https://mermaid.live)):
+
+```mermaid
+flowchart TD
+  U["业务代码<br/>import { createRoot } from 'react-dom/client'<br/>createRoot(container).render(<App/>)"] --> RDR
+  subgraph RD["react-dom (client)"]
+    RDR["createRoot(container, options)<br/>📄 ReactDOMRoot.js"] --> NR["new ReactDOMRoot(internalRoot)<br/>暴露 root.render / root.unmount"]
+  end
+  RDR --> CC
+  subgraph RR["react-reconciler"]
+    CC["createContainer<br/>tag = ConcurrentRoot"] --> CFR["createFiberRoot<br/>📦 FiberRootNode"]
+    CFR --> CHF["createHostRootFiber<br/>📦 HostRootFiber (Fiber)"]
+    CHF --> UQ["initializeUpdateQueue<br/>HostRootFiber.updateQueue"]
+  end
+  NR -. "用户调用 root.render(<App/>)" .-> UC
+  UC["updateContainer<br/>📄 ReactFiberReconciler.js"] --> EU["enqueueUpdate<br/>把 <App/> 推入 update.payload"]
+  EU --> SUF["scheduleUpdateOnFiber<br/>(root, fiber, lane)<br/>进入 reconciler 4 阶段"]
+
+  classDef created fill:#ffe2e2,stroke:#c33,stroke-width:1px;
+  class CFR,CHF,NR created;
+```
+
+> 🔴 红色节点为三大全局对象的创建时机: `ReactDOMRoot`(渲染器入口实例)、`FiberRoot`(协调器根对象)、`HostRootFiber`(双缓冲根 Fiber).
 
 下面逐一解释这 3 个对象的创建过程.
 
@@ -253,7 +277,32 @@ export function createHostRootFiber(
 
 ![](../../snapshots/bootstrap/process-concurrent.png)
 
-> 注: 该图是 v17 时期 concurrent 启动方式下的快照; v19 中无论用 `createRoot` 还是 `hydrateRoot`, 内存引用关系都与此图一致(HostRootFiber.mode 默认为 ConcurrentMode), legacy/blocking 两张图(`process-legacy.png` / `process-blocking.png`) 已不再适用, 图待重绘.
+> 注: 该图是 v17 时期 concurrent 启动方式下的快照; v19 中无论用 `createRoot` 还是 `hydrateRoot`, 内存引用关系都与此图一致(HostRootFiber.mode 默认为 ConcurrentMode), legacy/blocking 两张图(`process-legacy.png` / `process-blocking.png`) 已不再适用.
+
+下方为 v19 等价的内存引用关系图(Mermaid):
+
+```mermaid
+flowchart LR
+  DOM["📦 container<br/>(div#root, 浏览器 DOM)"]
+  RDR["🟥 ReactDOMRoot<br/>(react-dom)"]
+  FR["🟥 FiberRoot<br/>(react-reconciler)<br/>- containerInfo: 指向 DOM<br/>- current: 指向 HostRootFiber<br/>- pendingLanes<br/>- finishedWork"]
+  HRF["🟥 HostRootFiber<br/>tag=HostRoot<br/>mode=ConcurrentMode<br/>(可叠加 StrictLegacy / StrictEffects)"]
+  UQ["UpdateQueue<br/>(initializeUpdateQueue)"]
+  AE["📦 reactElement <App/><br/>(独立, 尚未与 HostRootFiber 关联)"]
+
+  RDR -- "_internalRoot" --> FR
+  FR -- "current" --> HRF
+  HRF -- "stateNode" --> FR
+  HRF -- "updateQueue" --> UQ
+  FR -- "containerInfo" --> DOM
+  DOM -. "__reactContainer$xxxx 反向指针<br/>(markContainerAsRoot)" .-> HRF
+  AE -. "等待 root.render(<App/>) 后<br/>挂到 update.payload.element" .-> UQ
+
+  classDef created fill:#ffe2e2,stroke:#c33,stroke-width:1px;
+  class RDR,FR,HRF created;
+```
+
+> 🔴 红色节点为初始化时被创建的 3 个全局对象, 三者之间通过 `stateNode` / `_internalRoot` / `current` 构成完整的双向引用. 容器 DOM 通过 `markContainerAsRoot` 反向挂载 `HostRootFiber`, 用于事件冒泡时定位.
 
 注意:
 

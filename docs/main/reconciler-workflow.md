@@ -23,7 +23,29 @@ order: 1
 
 ![](../../snapshots/reconciler-workflow/reactfiberworkloop.png)
 
-> 注: 该图绘制于 v17 时期, 主体 4 步骤(`输入 → 注册调度任务 → 执行任务回调 → 输出`)在 v19 中依然成立; 但 v18 起`performSyncWorkOnRoot / performConcurrentWorkOnRoot`已合并为单一入口`performWorkOnRoot(root, lanes, forceSync)`, 同时副作用链表(`firstEffect / nextEffect`)被`subtreeFlags`取代, 图待重绘.
+> 注: 该图绘制于 v17 时期, 主体 4 步骤(`输入 → 注册调度任务 → 执行任务回调 → 输出`)在 v19 中依然成立; 但 v18 起`performSyncWorkOnRoot / performConcurrentWorkOnRoot`已合并为单一入口`performWorkOnRoot(root, lanes, forceSync)`, 同时副作用链表(`firstEffect / nextEffect`)被`subtreeFlags`取代.
+
+下方为 v19 版本的等价流程图(Mermaid, 如未渲染请复制到 [mermaid.live](https://mermaid.live)):
+
+```mermaid
+flowchart LR
+  A[("① 输入<br/>setState / dispatchSetState<br/>root.render(...)")] --> B[scheduleUpdateOnFiber<br/>root, fiber, lane]
+  B --> C[markRootUpdated<br/>root.pendingLanes |= lane]
+  C --> D{② 注册调度<br/>ensureRootIsScheduled}
+  D -->|"SyncLane / DefaultLane"| E["microtask<br/>processRootScheduleInMicrotask"]
+  D -->|"TransitionLane / IdleLane"| F["Scheduler.scheduleCallback<br/>(schedulerPriority)"]
+  E --> G[("③ 任务回调<br/>performWorkOnRoot<br/>(root, lanes, forceSync=true)")]
+  F --> H[("③ 任务回调<br/>performWorkOnRoot<br/>(root, lanes, forceSync=false)")]
+  G --> I[renderRootSync<br/>workLoopSync]
+  H --> J[renderRootConcurrent<br/>workLoopConcurrent<br/>+ shouldYield]
+  I --> K[fiber 树构造<br/>beginWork / completeWork<br/>沿父链冒泡 subtreeFlags]
+  J --> K
+  K --> L[("④ 输出<br/>commitRoot")]
+  L --> M[commitBeforeMutationEffects<br/>DFS by subtreeFlags]
+  L --> N[commitMutationEffects<br/>含 useInsertionEffect]
+  L --> O[commitLayoutEffects<br/>componentDidMount<br/>useLayoutEffect]
+  L --> P[scheduleCallback NormalPriority<br/>flushPassiveEffects<br/>useEffect]
+```
 
 图中的`1,2,3,4`步骤可以反映`react-reconciler`包`从输入到输出`的运作流程,这是一个固定流程, 每一次更新都会运行.
 

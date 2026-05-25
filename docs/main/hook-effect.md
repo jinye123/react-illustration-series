@@ -168,7 +168,38 @@ type EffectInstance = {
 
 ![](../../snapshots/hook-effect/renderwithhooks-create.png)
 
-> 注: 此图绘制于 v17 时期, 图中 effect 节点没有`inst`字段, v19 中需要加上. 图待重绘.
+> 注: 此图绘制于 v17 时期, 图中 effect 节点没有`inst`字段, v19 中需要加上.
+
+下方为 v19 版本的 fiber → hook → effect → inst 引用关系图(Mermaid):
+
+```mermaid
+flowchart LR
+  F["fiber (FunctionComponent)<br/>flags = Update | Passive<br/>memoizedState → hook1<br/>updateQueue → fcUpdateQueue"]
+  H1["hook1<br/>memoizedState → effect1<br/>next → hook2"]
+  H2["hook2<br/>memoizedState → effect2"]
+  FCUQ["FunctionComponentUpdateQueue<br/>lastEffect → effect2 (环形)"]
+
+  E1["effect1<br/>tag = HookHasEffect | HookLayout<br/>create: () => fn<br/>inst → inst1<br/>deps: [a, b]<br/>next → effect2"]
+  E2["effect2<br/>tag = HookHasEffect | HookPassive<br/>create: () => fn<br/>inst → inst2<br/>deps: []<br/>next → effect1 (环回)"]
+
+  I1["⭐ inst1<br/>destroy: () => void | undefined<br/>(commit 后写回 setup 的返回值)"]
+  I2["⭐ inst2<br/>destroy: undefined"]
+
+  F --> H1 --> H2
+  F --> FCUQ
+  FCUQ --> E2
+  H1 -. "memoizedState" .-> E1
+  H2 -. "memoizedState" .-> E2
+  E1 --> E2 --> E1
+  E1 --> I1
+  E2 --> I2
+
+  classDef new fill:#ffe2b2,stroke:#c80,stroke-width:1px;
+  class I1,I2 new;
+```
+
+> ⭐ 橙色节点是 v18 新增的 `inst` 包装层(`EffectInstance`). v17 时期 `destroy` 直接挂在 `effect` 自身, 一旦渲染被丢弃就会丢失;  
+> v18+ 把 `destroy` 单独提取到 `inst`(在多次 render 之间共享同一个对象引用), 这样即使本次渲染被丢弃, 下一次 commit 仍能拿到上一次 setup 返回的清理函数.
 
 现在`workInProgress.flags`被打上了标记, 最后会在`fiber树渲染`阶段的`commitRoot`函数中处理. (这期间的所有过程可以回顾前文`fiber树构造/fiber树渲染`系列, 此处不再赘述)
 
@@ -396,7 +427,41 @@ function commitHookEffectListMount(flags: HookFlags, finishedWork: Fiber) {
 
 ![](../../snapshots/hook-effect/hook-commit-layout.png)
 
-> 此图绘制于 v17 时期, v19 中需补充`useInsertionEffect`在 mutation 阶段执行的窗口. 图待重绘.
+> 此图绘制于 v17 时期, v19 中需补充`useInsertionEffect`在 mutation 阶段执行的窗口.
+
+下方为 v19 中三类 Hook Effect 在 commit 阶段的执行时序图(Mermaid):
+
+```mermaid
+sequenceDiagram
+  participant DOM as DOM
+  participant CM as commitMutationEffects
+  participant CL as commitLayoutEffects
+  participant Sch as Scheduler
+  participant FP as flushPassiveEffects
+
+  Note over CM: ② commitMutationEffects (DOM 变更)
+  CM->>CM: 处理 deletions[] (ChildDeletion)
+  CM->>DOM: appendChild / removeChild / commitUpdate
+  rect rgba(255, 220, 100, 0.3)
+    CM->>CM: ⚡ commitHookEffectListUnmount(<br/>HookInsertion | HookHasEffect)
+    Note right of CM: 旧 useInsertionEffect.destroy()
+    CM->>CM: ⚡ commitHookEffectListMount(<br/>HookInsertion | HookHasEffect)
+    Note right of CM: 新 useInsertionEffect.create()<br/>CSS-in-JS 在此插入 <style>
+  end
+  CM->>DOM: Ref detach (旧 ref 清理 / refCleanup)
+  Note over CM,CL: 🔀 root.current = finishedWork<br/>(双缓冲切换)
+  Note over CL: ③ commitLayoutEffects (同步 layout)
+  CL->>CL: ClassComponent.componentDidMount/Update
+  CL->>CL: commitHookEffectListUnmount(<br/>HookLayout | HookHasEffect)
+  CL->>CL: commitHookEffectListMount(<br/>HookLayout | HookHasEffect)
+  Note right of CL: 旧/新 useLayoutEffect 在此同步执行
+  CL->>DOM: Ref attach (新 ref 挂载)
+  CL-->>Sch: 浏览器绘制 + scheduleCallback(NormalPriority,<br/>flushPassiveEffects)
+  Note over Sch,FP: 异步, 浏览器空闲
+  FP->>FP: DFS subtree, commitHookEffectListUnmount(<br/>HookPassive | HookHasEffect)
+  FP->>FP: DFS subtree, commitHookEffectListMount(<br/>HookPassive | HookHasEffect)
+  Note right of FP: useEffect 异步执行
+```
 
 ### flushPassiveEffects
 
@@ -450,7 +515,28 @@ function flushPassiveEffectsImpl() {
 
 ![](../../snapshots/hook-effect/hook-flushpassive.png)
 
-> 此图绘制于 v17 时期, v19 中已不再有`pendingPassiveHookEffectsUnmount / Mount`数组. 图待重绘.
+> 此图绘制于 v17 时期, v19 中已不再有`pendingPassiveHookEffectsUnmount / Mount`数组.
+
+下方为 v19 `flushPassiveEffects` 的 DFS 执行路径示意(Mermaid):
+
+```mermaid
+flowchart TD
+  ENTRY["flushPassiveEffects()<br/>(NormalSchedulerPriority 回调)"]
+  ENTRY --> U["commitPassiveUnmountEffects(root)<br/>DFS 整树, 沿 subtreeFlags & PassiveMask 剪枝"]
+  U --> U1["遇到 fiber.flags & ChildDeletion:<br/>对 fiber.deletions[] 中每个子树<br/>调用 commitHookPassiveUnmountEffects(unmounted)"]
+  U --> U2["遇到 fiber.flags & Passive:<br/>commitHookEffectListUnmount(<br/>HookPassive | HookHasEffect)"]
+  U --> M["commitPassiveMountEffects(root)<br/>同样 DFS 整树, 仅看 PassiveMask"]
+  M --> M1["fiber.flags & Passive:<br/>commitHookEffectListMount(<br/>HookPassive | HookHasEffect)<br/>↳ 调用 effect.create(), 把返回值写入 effect.inst.destroy"]
+  M --> Done["Done<br/>(无全局 pendingPassiveHookEffects 数组)"]
+
+  classDef remove fill:#ffd6d6,stroke:#c33,stroke-width:1px,stroke-dasharray:3 3;
+  R["❌ v17: pendingPassiveHookEffectsMount[]<br/>❌ v17: pendingPassiveHookEffectsUnmount[]<br/>v18+ 完全删除, 直接从 fiber 树 DFS 出"]
+  class R remove;
+```
+
+> 关键差别: v17 在 render 阶段就把 effect 推入两个全局数组, commit 后顺序执行;  
+> v19 改为 commit 完成后**直接对最新 fiber 树做两轮 DFS**(先全部 unmount, 再全部 mount), 借助 `subtreeFlags & PassiveMask` 剪枝.  
+> 这样可以保证: 卸载顺序与挂载顺序在父子之间一致, 并支持 Activity/Offscreen 等场景下"部分卸载/部分挂载".
 
 ## 更新 Hook
 

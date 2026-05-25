@@ -45,7 +45,38 @@ order: 7
 
 ![](../../snapshots/fibertree-update/fibertree-beforecommit.png)
 
-> 注: 上面两张图绘制于 v17 时期, 图中带绿色虚线箭头的`firstEffect/nextEffect`链路在 v19 中已删除. 子树副作用走`fiber.subtreeFlags`位掩码, 父 → 子方向沿 child/sibling 指针 DFS. 图待重绘.
+> 注: 上面两张图绘制于 v17 时期, 图中带绿色虚线箭头的`firstEffect/nextEffect`链路在 v19 中已删除. 子树副作用走`fiber.subtreeFlags`位掩码, 父 → 子方向沿 child/sibling 指针 DFS.
+
+下方为 v19 中"subtreeFlags 子树位掩码"的示意图(Mermaid):
+
+```mermaid
+flowchart TD
+  HRF["HostRootFiber<br/>flags = NoFlags<br/>subtreeFlags = Update | Placement<br/>(子树存在副作用 ✅)"]
+  APP["fiber(App)<br/>flags = Update<br/>subtreeFlags = Placement<br/>(自身 Update, 子树有 Placement)"]
+  H1["fiber(Header)<br/>flags = NoFlags<br/>subtreeFlags = NoFlags<br/>(整棵无副作用 ⏭ 跳过 DFS)"]
+  BTN["fiber(button)<br/>flags = NoFlags<br/>subtreeFlags = NoFlags<br/>(跳过)"]
+  DIV["fiber(div.content)<br/>flags = NoFlags<br/>subtreeFlags = Placement"]
+  P1["fiber(p) 'C'<br/>flags = Placement"]
+  P2["fiber(p) 'A'"]
+  P3["fiber(p) 'X'<br/>flags = Placement"]
+
+  HRF --> APP
+  APP --> H1
+  APP --> BTN
+  APP --> DIV
+  DIV --> P1
+  DIV --> P2
+  DIV --> P3
+
+  classDef hot fill:#ffe2e2,stroke:#c33,stroke-width:1px;
+  classDef cold fill:#eee,stroke:#999,stroke-width:1px,stroke-dasharray:3 3;
+  class HRF,APP,DIV,P1,P3 hot;
+  class H1,BTN,P2 cold;
+```
+
+> 🔴 红色节点: `flags` 或 `subtreeFlags` 非空, commit 阶段会进入 DFS.  
+> ⚪ 灰色节点: `flags === 0 && subtreeFlags === 0`, commit 时被剪枝直接 `return`, 不再访问其子树.  
+> 这就是 v19 替代 v17 副作用链表的核心机制——**先冒泡, 后剪枝**.
 
 ## commitRoot
 
@@ -205,7 +236,28 @@ function commitRootImpl(
 注意:
 
 - v17 时期需要"将根节点添加到副作用队列的末尾"的特殊处理, v19 中**无需**: 因为根节点本身的`flags / subtreeFlags`本来就会被三阶段 DFS 处理到.
-- `firstEffect / nextEffect`链表已删除, 整张图`fiber-effectlist.png` 在 v19 中已不再适用, 图待重绘.
+- `firstEffect / nextEffect`链表已删除, 整张图`fiber-effectlist.png` 在 v19 中已不再适用.
+
+下方为 v19 commit "渲染前"阶段时序图(Mermaid):
+
+```mermaid
+sequenceDiagram
+  participant WL as ReactFiberWorkLoop
+  participant FR as FiberRoot
+  participant Sch as Scheduler
+
+  WL->>FR: finishedWork = root.current.alternate
+  WL->>FR: finishedLanes = lanes
+  WL->>WL: commitRoot(root, finishedWork, lanes)
+  WL->>FR: 清空 finishedWork / finishedLanes /<br/>callbackNode / callbackPriority
+  WL->>FR: markRootFinished(root, lanes, remainingLanes)<br/>↳ pendingLanes &= ~lanes
+  WL->>WL: 重置全局: workInProgressRoot = null<br/>workInProgress = null
+  alt finishedWork.subtreeFlags & PassiveMask ≠ 0
+    WL->>Sch: scheduleCallback(NormalSchedulerPriority,<br/>flushPassiveEffects)
+    Note over Sch: 异步, 浏览器空闲后执行<br/>useEffect 在此期间冲刷
+  end
+  WL-->>WL: 进入"渲染"阶段 (三大 effects)
+```
 
 ### 渲染
 
@@ -238,7 +290,46 @@ function commitRootImpl(
 
 ![](../../snapshots/fibertree-commit/fiber-noredundant.png)
 
-> 注: 此图绘制于 v17 时期, 图中`fiberRoot.finishedWork.firstEffect` → ... → ... 这条线性链路在 v19 中已删除. 实际 DFS 走的是父 → 子 + sibling 指针. 图待重绘.
+> 注: 此图绘制于 v17 时期, 图中`fiberRoot.finishedWork.firstEffect` → ... → ... 这条线性链路在 v19 中已删除. 实际 DFS 走的是父 → 子 + sibling 指针.
+
+下方为 v19 commit 三阶段的 DFS 路径示意(Mermaid):
+
+```mermaid
+flowchart TB
+  subgraph S1["① commitBeforeMutationEffects"]
+    direction TB
+    A1["DFS by (subtreeFlags & BeforeMutationMask)"]
+    A2["ClassComponent: getSnapshotBeforeUpdate"]
+    A3["HostRoot: clearContainer (Snapshot)"]
+    A1 --> A2 & A3
+  end
+  subgraph S2["② commitMutationEffects"]
+    direction TB
+    B1["DFS by (subtreeFlags & MutationMask)"]
+    B2["先处理 deletions[] (ChildDeletion)<br/>commitDeletionEffects"]
+    B3["HostComponent: commitPlacement / commitUpdate"]
+    B4["Ref detach<br/>(执行旧 ref 的 cleanup)"]
+    B5["⚡useInsertionEffect destroy + create<br/>(同步, 早于 layout)"]
+    B1 --> B2 & B3 & B4 & B5
+  end
+  subgraph S3["③ commitLayoutEffects"]
+    direction TB
+    C1["DFS by (subtreeFlags & LayoutMask)"]
+    C2["ClassComponent: componentDidMount /<br/>componentDidUpdate"]
+    C3["useLayoutEffect destroy + create<br/>(同步)"]
+    C4["Ref attach<br/>(可能产生 refCleanup)"]
+    C1 --> C2 & C3 & C4
+  end
+  subgraph S4["④ requestPaint + 异步"]
+    direction TB
+    D1["浏览器绘制"]
+    D2["flushPassiveEffects<br/>(NormalSchedulerPriority 回调)"]
+    D3["useEffect destroy + create"]
+    D1 --> D2 --> D3
+  end
+
+  S1 --> S2 --> S3 --> S4
+```
 
 #### commitBeforeMutationEffects
 
@@ -610,7 +701,32 @@ if (
 }
 ```
 
-> 旧图`clear-effectlist.png`在 v19 中已不再适用(没有 effect list 可拆), 图待重绘.
+> 旧图`clear-effectlist.png`在 v19 中已不再适用(没有 effect list 可拆).
+
+下方为 v19 渲染后 `current` ↔ `workInProgress` 双缓冲切换示意(Mermaid):
+
+```mermaid
+flowchart LR
+  subgraph Before["commitMutationEffects 完成前"]
+    direction TB
+    FR1["FiberRoot<br/>current → A"] --> A1["A (HostRootFiber, 旧)"]
+    FR1 -. "finishedWork" .-> B1["B (HostRootFiber.alternate, 新)<br/>包含最新 fiber 树"]
+    A1 <-- "alternate" --> B1
+  end
+  subgraph After["commitMutationEffects 完成 → 切换"]
+    direction TB
+    FR2["FiberRoot<br/>current → B ✅"] --> B2["B (HostRootFiber, 新当前)<br/>已挂载到 DOM"]
+    FR2 -. "finishedWork = null" .-> A2["A (旧 HostRootFiber, 待复用)<br/>下一轮 render 作为 workInProgress"]
+    A2 <-- "alternate" --> B2
+  end
+  Before --> After
+
+  classDef cur fill:#dff7dd,stroke:#2c8a2c,stroke-width:1px;
+  class A1,B2 cur;
+```
+
+> 🟢 绿色节点 = 当前 `FiberRoot.current` 指向的 fiber 树.  
+> 切换发生在 commitMutationEffects 与 commitLayoutEffects 之间(`root.current = finishedWork`), 这就是为什么 `componentDidMount / useLayoutEffect` 中读到的已经是新 DOM、新 props 和新 state.
 
 ## 总结
 

@@ -62,7 +62,7 @@ export function createContext<T>(defaultValue: T): ReactContext<T> {
 
 比如, 创建`const MyContext = React.createContext(defaultValue);`, 之后使用以下任一形式都可声明一个`ContextProvider`类型的组件:
 
-```jsx
+```jsx | pure
 // v19 推荐: Provider 简写
 <MyContext value={someValue}>{children}</MyContext>
 
